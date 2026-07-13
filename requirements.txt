@@ -7,4 +7,4 @@ xlrd>=2.0,<3
 python-calamine>=0.5,<1
 pymupdf>=1.26,<2
 reportlab>=4.2,<5
-openai>=1.0,<3
+google-genai>=1.75,<3

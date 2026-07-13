@@ -279,19 +279,19 @@ Priorizar o estudo do **{preferred}**. As operações potencialmente creditávei
 """
 
 
-def generate_report_with_ai(
+def generate_report_with_gemini(
     local_report: str,
     projection: FutureProjection,
     api_key: str,
     model: str,
 ) -> str:
-    """Enriquece o relatório por API de IA, somente após ação explícita do usuário."""
+    """Enriquece o relatório pela API Gemini após ação explícita do usuário."""
     if not api_key or not model:
-        raise AnalyticsError("Informe a chave da API e o modelo para usar IA generativa.")
+        raise AnalyticsError("Configure GEMINI_API_KEY e GEMINI_MODEL nos secrets do Streamlit.")
     try:
-        from openai import OpenAI
+        from google import genai
     except ImportError as exc:
-        raise AnalyticsError("A biblioteca openai não está instalada. Execute o arquivo iniciar_portal.bat.") from exc
+        raise AnalyticsError("A biblioteca google-genai não está instalada. Execute o arquivo iniciar_portal.bat.") from exc
     prompt = f"""Atue como consultor tributário sênior. Revise o relatório abaixo e produza uma versão executiva em português do Brasil. Preserve os números, não invente regras ou alíquotas, diferencie fatos de premissas e organize: resumo, três possibilidades, riscos, recomendação condicional e plano de ação. Inclua aviso de que não substitui parecer profissional.
 
 Dados estruturados:
@@ -305,7 +305,15 @@ Relatório-base:
 {local_report}
 """
     try:
-        response = OpenAI(api_key=api_key).responses.create(model=model, input=prompt)
-        return response.output_text
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+        )
+        if not response.text:
+            raise AnalyticsError("O Gemini não retornou conteúdo textual.")
+        return response.text
     except Exception as exc:
-        raise AnalyticsError(f"A IA generativa não conseguiu produzir o relatório: {exc}") from exc
+        if isinstance(exc, AnalyticsError):
+            raise
+        raise AnalyticsError(f"O Gemini não conseguiu produzir o relatório: {exc}") from exc

@@ -25,7 +25,7 @@ from analytics_engine import (
     FutureProjection,
     build_future_projection,
     generate_local_intelligent_report,
-    generate_report_with_ai,
+    generate_report_with_gemini,
 )
 from dashboard_exports import (
     attention_points,
@@ -48,6 +48,7 @@ from dominio_importers import (
 
 REFERENCE_IBS_CBS_RATE = 0.265
 DEFAULT_DAS_IBS_CBS_SHARE = 0.35
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
 
 
 class DataValidationError(ValueError):
@@ -630,6 +631,14 @@ def format_cnpj(value: str) -> str:
     return value
 
 
+def get_streamlit_secret(name: str, default: str = "") -> str:
+    """Lê secret sem falhar quando o arquivo ainda não foi configurado."""
+    try:
+        return str(st.secrets.get(name, os.getenv(name, default)))
+    except Exception:
+        return os.getenv(name, default)
+
+
 def render_dominio_results(
     report: DominioSimulationReport,
     monthly: MonthlyReport,
@@ -787,27 +796,35 @@ def render_dominio_results(
     )
     active_report = st.session_state.get(report_state_key, intelligent_report)
     st.markdown(active_report)
-    with st.expander("Enriquecer com IA generativa (opcional)"):
+    with st.expander("Enriquecer com Gemini (opcional)"):
         st.caption(
             "O relatório acima é produzido localmente. A opção abaixo envia o relatório-base para a API "
             "configurada somente quando você clicar em gerar. Não envie dados sem autorização do cliente."
         )
-        configured_key = os.getenv("OPENAI_API_KEY", "")
-        api_key = st.text_input(
-            "Chave da API",
-            value="" if not configured_key else configured_key,
-            type="password",
-            help="Pode ser configurada pela variável OPENAI_API_KEY.",
+        api_key = get_streamlit_secret("GEMINI_API_KEY")
+        configured_model = get_streamlit_secret("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+        model_options = [
+            "gemini-3.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+        ]
+        if configured_model not in model_options:
+            model_options.insert(0, configured_model)
+        model = st.selectbox(
+            "Modelo Gemini",
+            model_options,
+            index=model_options.index(configured_model),
+            help="gemini-3.5-flash é o padrão estável recomendado para este relatório; 2.5 Pro prioriza raciocínio complexo.",
         )
-        model = st.text_input(
-            "Modelo",
-            value=os.getenv("OPENAI_MODEL", ""),
-            placeholder="Informe o modelo autorizado em sua conta",
-        )
-        if st.button("Gerar relatório com IA", type="secondary"):
+        if api_key:
+            st.success("GEMINI_API_KEY carregada pelos secrets do Streamlit.")
+        else:
+            st.info("Configure GEMINI_API_KEY em .streamlit/secrets.toml ou nos Secrets do Streamlit Cloud.")
+        if st.button("Gerar relatório com Gemini", type="secondary", disabled=not api_key):
             try:
                 with st.spinner("Analisando cenários e recomendações..."):
-                    st.session_state[report_state_key] = generate_report_with_ai(
+                    st.session_state[report_state_key] = generate_report_with_gemini(
                         intelligent_report, projection, api_key, model
                     )
                 st.rerun()

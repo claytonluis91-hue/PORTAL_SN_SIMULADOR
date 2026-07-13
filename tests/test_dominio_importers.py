@@ -1,10 +1,15 @@
 import unittest
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import ANY, MagicMock, patch
 
 import pandas as pd
 
-from analytics_engine import build_future_projection, generate_local_intelligent_report
+from analytics_engine import (
+    build_future_projection,
+    generate_local_intelligent_report,
+    generate_report_with_gemini,
+)
 from app import prepare_parameters, prepare_transaction_data
 from dashboard_exports import (
     build_excel_dashboard,
@@ -134,6 +139,21 @@ class DominioImporterTests(unittest.TestCase):
         self.assertEqual(prepared_purchases["Valor_Base_Credito"].sum(), 7000.0)
         self.assertEqual(annex, "I")
         self.assertAlmostEqual(rate, 0.085)
+
+    @patch("google.genai.Client")
+    def test_gemini_report_integration_uses_selected_model(self, client_class: MagicMock) -> None:
+        projection = build_future_projection([self.report], self.monthly)
+        response = MagicMock()
+        response.text = "Relatório Gemini validado"
+        client_class.return_value.models.generate_content.return_value = response
+        result = generate_report_with_gemini(
+            "relatório-base", projection, "chave-de-teste", "gemini-3.5-flash"
+        )
+        self.assertEqual(result, "Relatório Gemini validado")
+        client_class.return_value.models.generate_content.assert_called_once_with(
+            model="gemini-3.5-flash",
+            contents=ANY,
+        )
 
 
 if __name__ == "__main__":

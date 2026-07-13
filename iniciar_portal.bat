@@ -26,7 +26,7 @@ if not exist "app.py" (
 )
 
 echo Verificando dependencias...
-python -c "import streamlit, pandas, plotly, xlsxwriter, matplotlib, fitz, python_calamine, reportlab, openai" >nul 2>&1
+python -c "import streamlit, pandas, plotly, xlsxwriter, matplotlib, fitz, python_calamine, reportlab, google.genai" >nul 2>&1
 if errorlevel 1 (
     echo Dependencias ausentes. Instalando a partir de requirements.txt...
     python -m pip install -r requirements.txt

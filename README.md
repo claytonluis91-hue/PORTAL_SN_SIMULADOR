@@ -42,9 +42,17 @@ são bloqueados.
 O relatório inteligente possui duas modalidades:
 
 - motor analítico local, sem envio de dados para serviços externos;
-- IA generativa opcional, acionada pelo usuário mediante chave e modelo
-  autorizados. As variáveis `OPENAI_API_KEY` e `OPENAI_MODEL` podem ser usadas
-  para configuração local.
+- Gemini opcional, acionado pelo usuário mediante chave configurada nos Secrets
+  do Streamlit. Use `GEMINI_API_KEY` e, opcionalmente, `GEMINI_MODEL`. O padrão
+  é `gemini-3.5-flash`; também estão disponíveis Gemini 2.5 Pro, Flash e
+  Flash-Lite.
+
+Exemplo de `.streamlit/secrets.toml`:
+
+```toml
+GEMINI_API_KEY = "sua-chave"
+GEMINI_MODEL = "gemini-3.5-flash"
+```
 
 No modo transacional, o botão **Baixar modelo Excel para preenchimento** gera
 as abas Faturamento, Entradas, Parametros_SN e Instruções com validações e
