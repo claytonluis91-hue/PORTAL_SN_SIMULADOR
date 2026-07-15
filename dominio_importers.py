@@ -29,6 +29,10 @@ class DominioSimulationReport:
     aliquota_ibs_2027: float
     aliquota_cbs_2033: float
     aliquota_ibs_2033: float
+    aliquota_credito_cbs_2027: float
+    aliquota_credito_ibs_2027: float
+    aliquota_credito_cbs_2033: float
+    aliquota_credito_ibs_2033: float
     saidas_por_acumulador: pd.DataFrame
     entradas_por_acumulador: pd.DataFrame
     clientes_por_regime: pd.DataFrame
@@ -181,10 +185,9 @@ def _extract_section_rows(
     return pd.DataFrame(records)
 
 
-def parse_dominio_simulation(content: bytes) -> DominioSimulationReport:
-    workbook = _open_legacy_workbook(content)
-    summary = _read_sheet(workbook, _find_sheet(workbook, "resumido"))
-    detail = _read_sheet(workbook, _find_sheet(workbook, "detalhado"))
+def _parse_dominio_simulation_frames(
+    summary: pd.DataFrame, detail: pd.DataFrame
+) -> DominioSimulationReport:
     if summary.shape[1] < 75 or detail.shape[1] < 17:
         raise DominioImportError("O relatório de simulação possui menos colunas que o layout esperado.")
 
@@ -239,6 +242,10 @@ def parse_dominio_simulation(content: bytes) -> DominioSimulationReport:
         aliquota_ibs_2027=parse_br_number(summary.iat[debit_row, 22]) / 100,
         aliquota_cbs_2033=parse_br_number(summary.iat[debit_row, 50]) / 100,
         aliquota_ibs_2033=parse_br_number(summary.iat[debit_row, 60]) / 100,
+        aliquota_credito_cbs_2027=parse_br_number(summary.iat[credit_row, 14]) / 100,
+        aliquota_credito_ibs_2027=parse_br_number(summary.iat[credit_row, 22]) / 100,
+        aliquota_credito_cbs_2033=parse_br_number(summary.iat[credit_row, 50]) / 100,
+        aliquota_credito_ibs_2033=parse_br_number(summary.iat[credit_row, 60]) / 100,
         saidas_por_acumulador=saidas,
         entradas_por_acumulador=entradas,
         clientes_por_regime=clientes,
@@ -246,6 +253,63 @@ def parse_dominio_simulation(content: bytes) -> DominioSimulationReport:
         vendas_nao_contribuinte=non_taxpayer_sales,
         percentual_operacoes_creditaveis=creditable_ratio,
     )
+
+
+def _sheet_group_key(sheet_name: str, term: str) -> str:
+    """Extrai o identificador que associa abas Resumido/Detalhado da competência."""
+    words = normalize_text(sheet_name).split()
+    return " ".join(word for word in words if word != normalize_text(term))
+
+
+def _simulation_sheet_pairs(workbook: pd.ExcelFile) -> list[tuple[str, str]]:
+    summaries = [name for name in workbook.sheet_names if "resumido" in normalize_text(name)]
+    details = [name for name in workbook.sheet_names if "detalhado" in normalize_text(name)]
+    if not summaries or not details:
+        raise DominioImportError(
+            "O arquivo precisa conter ao menos uma aba Resumido e uma aba Detalhado. "
+            f"Abas disponíveis: {', '.join(workbook.sheet_names)}."
+        )
+
+    details_by_key: dict[str, list[str]] = {}
+    for name in details:
+        details_by_key.setdefault(_sheet_group_key(name, "detalhado"), []).append(name)
+
+    pairs: list[tuple[str, str]] = []
+    used_details: set[str] = set()
+    for index, summary_name in enumerate(summaries):
+        key = _sheet_group_key(summary_name, "resumido")
+        candidates = [name for name in details_by_key.get(key, []) if name not in used_details]
+        if not candidates and len(summaries) == len(details):
+            positional = details[index]
+            candidates = [positional] if positional not in used_details else []
+        if not candidates:
+            raise DominioImportError(
+                f"Não foi possível associar a aba '{summary_name}' a uma aba Detalhado."
+            )
+        detail_name = candidates[0]
+        used_details.add(detail_name)
+        pairs.append((summary_name, detail_name))
+    return pairs
+
+
+def parse_dominio_simulations(content: bytes) -> list[DominioSimulationReport]:
+    """Lê todas as competências de um XLS/XLSX, inclusive quando separadas em abas."""
+    workbook = _open_legacy_workbook(content)
+    reports = [
+        _parse_dominio_simulation_frames(
+            _read_sheet(workbook, summary_name),
+            _read_sheet(workbook, detail_name),
+        )
+        for summary_name, detail_name in _simulation_sheet_pairs(workbook)
+    ]
+    if not reports:
+        raise DominioImportError("Nenhuma competência foi encontrada no relatório de simulação.")
+    return reports
+
+
+def parse_dominio_simulation(content: bytes) -> DominioSimulationReport:
+    """Compatibilidade: devolve a competência mais recente do arquivo."""
+    return max(parse_dominio_simulations(content), key=lambda report: report.periodo)
 
 
 def parse_dominio_monthly(content: bytes) -> MonthlyReport:

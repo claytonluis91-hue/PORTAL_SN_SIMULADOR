@@ -9,18 +9,28 @@ from analytics_engine import (
     build_future_projection,
     generate_local_intelligent_report,
     generate_report_with_gemini,
+    list_gemini_models,
 )
 from app import prepare_parameters, prepare_transaction_data
 from dashboard_exports import (
     build_excel_dashboard,
     build_transactional_template,
     create_dashboard_images,
+    dashboard_explanations,
 )
 from dominio_importers import (
+    _simulation_sheet_pairs,
     cnpjs_are_compatible,
     parse_dominio_monthly,
     parse_dominio_simulation,
     parse_pgdas,
+)
+from simples_lc214 import simulate_lc214_2027_2028, tax_comparison_frame
+from nascel_consulting import (
+    build_nascel_diagnostic,
+    decision_matrix_frame,
+    legal_timeline_frame,
+    official_sources_frame,
 )
 
 
@@ -29,6 +39,20 @@ DOCUMENTS = ROOT / "documentos"
 
 
 class DominioImporterTests(unittest.TestCase):
+    def test_multi_month_workbook_pairs_summary_and_detail_tabs(self) -> None:
+        workbook = MagicMock()
+        workbook.sheet_names = [
+            "Resumido 01-2027", "Detalhado 01-2027",
+            "Resumido 02-2027", "Detalhado 02-2027",
+        ]
+        self.assertEqual(
+            _simulation_sheet_pairs(workbook),
+            [
+                ("Resumido 01-2027", "Detalhado 01-2027"),
+                ("Resumido 02-2027", "Detalhado 02-2027"),
+            ],
+        )
+
     @classmethod
     def setUpClass(cls) -> None:
         required = [
@@ -50,6 +74,10 @@ class DominioImporterTests(unittest.TestCase):
         self.assertAlmostEqual(self.report.fase_2027["total"], 4486.35)
         self.assertAlmostEqual(self.report.fase_2033["total"], 4367.37)
         self.assertAlmostEqual(self.report.percentual_operacoes_creditaveis, 0.9325027843)
+        self.assertAlmostEqual(self.report.aliquota_credito_cbs_2027, 0.088)
+        self.assertAlmostEqual(self.report.aliquota_credito_ibs_2027, 0.0)
+        self.assertAlmostEqual(self.report.aliquota_credito_cbs_2033, 0.088)
+        self.assertAlmostEqual(self.report.aliquota_credito_ibs_2033, 0.177)
 
     def test_monthly_report_has_all_competences(self) -> None:
         self.assertEqual(len(self.monthly.movimentos), 17)
@@ -70,6 +98,19 @@ class DominioImporterTests(unittest.TestCase):
         intelligent_report = generate_local_intelligent_report(
             projection, [self.report], self.monthly, self.pgdas
         )
+        lc214 = simulate_lc214_2027_2028(
+            self.report.base_saidas,
+            self.pgdas.rbt12,
+            self.pgdas.anexo,
+            self.report.fase_2027["cbs"],
+            self.report.fase_2027["ibs"],
+        )
+        lc214_comparison = tax_comparison_frame(
+            self.report.tributos_atuais,
+            lc214,
+            inside_total_override=self.report.tributos_atuais["Total"],
+            outside_residual_total_override=self.report.fase_2027["simples_residual"],
+        )
         excel = build_excel_dashboard(
             self.report,
             self.monthly,
@@ -77,9 +118,30 @@ class DominioImporterTests(unittest.TestCase):
             projection=projection,
             intelligent_report=intelligent_report,
             reports=[self.report],
+            lc214_comparison=lc214_comparison,
+            lc214_simulation=lc214,
         )
         self.assertEqual(excel[:2], b"PK")
         self.assertGreater(len(excel), 50_000)
+        workbook = pd.ExcelFile(BytesIO(excel), engine="calamine")
+        self.assertIn("Simples_LC214", workbook.sheet_names)
+        self.assertIn("Como_Ler", workbook.sheet_names)
+        self.assertIn("Diagnostico_Nascel", workbook.sheet_names)
+        self.assertIn("Decisao_Tributaria", workbook.sheet_names)
+        self.assertIn("Cronograma_Legal", workbook.sheet_names)
+        self.assertIn("Fontes_Oficiais", workbook.sheet_names)
+        sensitivity = pd.read_excel(
+            BytesIO(excel), sheet_name="Sensibilidade", header=None, engine="calamine"
+        )
+        self.assertIn("FINALIDADE", str(sensitivity.iat[1, 0]))
+        self.assertEqual(sensitivity.iat[8, 1], "Base Creditável / Receita")
+        self.assertIn("Base atual da empresa", sensitivity.iloc[:, 0].astype(str).tolist())
+        guide = pd.read_excel(BytesIO(excel), sheet_name="Como_Ler", skiprows=3, engine="calamine")
+        self.assertIn("Como interpretar", guide.columns)
+        explanations = dashboard_explanations(
+            self.report, self.monthly, self.pgdas, projection, lc214
+        )
+        self.assertIn("Nova tabela LC 214/2025", explanations["Indicador"].tolist())
         images = create_dashboard_images(self.report, self.monthly, self.pgdas, projection)
         self.assertEqual(
             set(images),
@@ -92,6 +154,35 @@ class DominioImporterTests(unittest.TestCase):
         )
         self.assertTrue(all(content.startswith(b"\x89PNG") for content in images.values()))
 
+    def test_nascel_consulting_layers_are_explainable(self) -> None:
+        lc214 = simulate_lc214_2027_2028(
+            self.report.base_saidas,
+            self.pgdas.rbt12,
+            self.pgdas.anexo,
+            self.report.fase_2027["cbs"],
+            self.report.fase_2027["ibs"],
+        )
+        diagnostic = build_nascel_diagnostic(
+            self.report, self.monthly, self.pgdas, [self.report], lc214
+        )
+        self.assertGreaterEqual(diagnostic.score, 0)
+        self.assertLessEqual(diagnostic.score, 100)
+        self.assertEqual(len(diagnostic.checklist), 6)
+        self.assertIn("Próxima ação", diagnostic.checklist.columns)
+        matrix = decision_matrix_frame(self.report, lc214)
+        self.assertEqual(matrix["Caminho"].tolist(), [
+            "CBS/IBS dentro do DAS", "CBS/IBS fora do DAS"
+        ])
+        self.assertAlmostEqual(matrix.iloc[0]["Desembolso estimado"], 4_460.32)
+        self.assertAlmostEqual(matrix.iloc[1]["Desembolso estimado"], 4_486.35)
+        self.assertIn("Base legal", matrix.columns)
+        self.assertEqual(legal_timeline_frame()["Período"].tolist(), [
+            "2026", "2027–2028", "2029–2032", "2033"
+        ])
+        self.assertTrue(
+            official_sources_frame()["URL"].str.startswith("https://").all()
+        )
+
     def test_future_projection_uses_average_and_deduplicates_periods(self) -> None:
         projection = build_future_projection(
             [self.report, self.report], self.monthly, horizon_months=6, average_months=6
@@ -100,9 +191,10 @@ class DominioImporterTests(unittest.TestCase):
             (self.monthly.movimentos.tail(6)["Saídas"] + self.monthly.movimentos.tail(6)["Serviços"]).mean()
         )
         self.assertAlmostEqual(projection.media_saidas, expected_sales)
-        self.assertEqual(len(projection.projecao_mensal), 6)
+        self.assertEqual(len(projection.projecao_mensal), 12)
+        self.assertEqual(len(projection.resumo_anual), 2)
         self.assertEqual(len(projection.historico_simulacoes), 1)
-        self.assertIn("Relatório inteligente", generate_local_intelligent_report(
+        self.assertIn("Relatório Consultivo Nascel", generate_local_intelligent_report(
             projection, [self.report], self.monthly, self.pgdas
         ))
 
@@ -153,7 +245,40 @@ class DominioImporterTests(unittest.TestCase):
         client_class.return_value.models.generate_content.assert_called_once_with(
             model="gemini-3.5-flash",
             contents=ANY,
+            config=ANY,
         )
+
+    @patch("google.genai.Client")
+    def test_gemini_model_list_filters_and_prioritizes_text_models(
+        self, client_class: MagicMock
+    ) -> None:
+        def model(name: str, actions: list[str]) -> MagicMock:
+            item = MagicMock()
+            item.name = f"models/{name}"
+            item.supported_actions = actions
+            return item
+
+        client_class.return_value.models.list.return_value = [
+            model("gemini-2.5-flash", ["generateContent"]),
+            model("text-embedding-004", ["embedContent"]),
+            model("gemini-3.5-flash", ["generateContent"]),
+            model("gemini-2.5-flash-image", ["generateContent"]),
+        ]
+        self.assertEqual(
+            list_gemini_models("chave-de-teste"),
+            ["gemini-3.5-flash", "gemini-2.5-flash"],
+        )
+
+    @patch("google.genai.Client")
+    def test_gemini_quota_error_is_actionable(self, client_class: MagicMock) -> None:
+        projection = build_future_projection([self.report], self.monthly)
+        client_class.return_value.models.generate_content.side_effect = RuntimeError(
+            "429 RESOURCE_EXHAUSTED quota exceeded"
+        )
+        with self.assertRaisesRegex(Exception, "cota"):
+            generate_report_with_gemini(
+                "relatório-base", projection, "chave-de-teste", "gemini-3.5-flash"
+            )
 
 
 if __name__ == "__main__":

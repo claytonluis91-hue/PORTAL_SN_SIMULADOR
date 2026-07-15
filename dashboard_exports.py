@@ -15,65 +15,79 @@ from dominio_importers import (
     PGDASReport,
     cnpjs_are_compatible,
 )
+from simples_lc214 import SimplesLC214Simulation
+from nascel_consulting import (
+    NASCEL_COLORS,
+    NASCEL_NAME,
+    NASCEL_TAGLINE,
+    build_nascel_diagnostic,
+    decision_matrix_frame,
+    legal_timeline_frame,
+    official_sources_frame,
+)
 
 
 COLORS = {
-    "navy": "#123B5D",
-    "blue": "#2F80ED",
-    "green": "#16A085",
-    "yellow": "#F2C94C",
-    "red": "#C0392B",
-    "slate": "#526579",
-    "light": "#F4F7FA",
+    "navy": NASCEL_COLORS["navy"],
+    "blue": NASCEL_COLORS["navy"],
+    "green": NASCEL_COLORS["green"],
+    "yellow": NASCEL_COLORS["gold"],
+    "red": NASCEL_COLORS["red"],
+    "slate": NASCEL_COLORS["slate"],
+    "light": NASCEL_COLORS["cream"],
 }
 
 
-def scenario_table(report: DominioSimulationReport) -> pd.DataFrame:
+def scenario_table(
+    report: DominioSimulationReport,
+    lc214_simulation: SimplesLC214Simulation | None = None,
+) -> pd.DataFrame:
     revenue = report.base_saidas
     current_total = report.tributos_atuais["Total"]
     effective_rate = current_total / revenue if revenue else 0.0
-    replaced_taxes = sum(
-        report.tributos_atuais.get(tax, 0.0) for tax in ("ICMS", "ISS", "PIS/Pasep", "COFINS")
+    # A comparação isola o efeito da reforma: com a mesma base, Anexo e
+    # segregações, 2027 por dentro preserva a carga efetiva de 2026. A tabela
+    # legal é usada para a partilha interna, não para inventar uma diferença
+    # causada por RBT12 ou premissas incompatíveis com o arquivo importado.
+    inside_total = current_total
+    inside_effective_rate = effective_rate
+    inside_label = "Simples Por Dentro 2027 — mesma carga de 2026"
+    credit_2027 = report.base_entradas_credito * (
+        report.aliquota_credito_cbs_2027 + report.aliquota_credito_ibs_2027
     )
-    das_ibs_cbs_share = replaced_taxes / current_total if current_total else 0.0
-    credit_sensitive_sales = revenue * report.percentual_operacoes_creditaveis
-    inside_credit = credit_sensitive_sales * effective_rate * das_ibs_cbs_share
-    credit_2027 = credit_sensitive_sales * (
-        report.aliquota_cbs_2027 + report.aliquota_ibs_2027
-    )
-    credit_2033 = credit_sensitive_sales * (
-        report.aliquota_cbs_2033 + report.aliquota_ibs_2033
+    credit_2033 = report.base_entradas_credito * (
+        report.aliquota_credito_cbs_2033 + report.aliquota_credito_ibs_2033
     )
     rows = [
         {
-            "Cenário": "Atual — base de comparação",
+            "Cenário": "Simples 2026 — atual",
             "Carga Tributária": current_total,
             "Carga Efetiva": effective_rate,
-            "Crédito Potencial ao Cliente": 0.0,
+            "Crédito Estimado das Compras": 0.0,
             "Variação vs. Atual": 0.0,
             "Leitura": "Referência atual",
         },
         {
-            "Cenário": "Simples Por Dentro — proxy",
-            "Carga Tributária": current_total,
-            "Carga Efetiva": effective_rate,
-            "Crédito Potencial ao Cliente": inside_credit,
-            "Variação vs. Atual": 0.0,
-            "Leitura": "Menor complexidade; crédito limitado ao montante dentro do DAS",
+            "Cenário": inside_label,
+            "Carga Tributária": inside_total,
+            "Carga Efetiva": inside_effective_rate,
+            "Crédito Estimado das Compras": 0.0,
+            "Variação vs. Atual": inside_total - current_total,
+            "Leitura": "Sem diferença de tributação vs. 2026 na mesma base; muda somente a partilha do DAS",
         },
         {
             "Cenário": "Híbrido 2027 — Domínio",
             "Carga Tributária": report.fase_2027["total"],
             "Carga Efetiva": report.fase_2027["total"] / revenue if revenue else 0.0,
-            "Crédito Potencial ao Cliente": credit_2027,
+            "Crédito Estimado das Compras": credit_2027,
             "Variação vs. Atual": report.fase_2027["diferenca"],
-            "Leitura": "Aumento pequeno de carga e maior crédito comercial",
+            "Leitura": "Crédito das compras sujeito a documento idôneo e demais requisitos",
         },
         {
             "Cenário": "Híbrido 2033 — Domínio",
             "Carga Tributária": report.fase_2033["total"],
             "Carga Efetiva": report.fase_2033["total"] / revenue if revenue else 0.0,
-            "Crédito Potencial ao Cliente": credit_2033,
+            "Crédito Estimado das Compras": credit_2033,
             "Variação vs. Atual": report.fase_2033["diferenca"],
             "Leitura": "Menor carga estimada, sujeita à confirmação das alíquotas futuras",
         },
@@ -97,6 +111,8 @@ def attention_points(
             {
                 "Prioridade": "CRÍTICO",
                 "Tema": "CNPJ divergente no PGDAS",
+                "O que significa": "Os arquivos não representam a mesma empresa e não podem sustentar uma conclusão conjunta.",
+                "Dados considerados": "CNPJ da Simulação da Reforma e CNPJ do extrato PGDAS-D.",
                 "Constatação": f"Domínio: {report.cnpj} | PGDAS: {pgdas.cnpj_estabelecimento or pgdas.cnpj_basico}",
                 "Ação": "Não consolidar os arquivos. Importar o PGDAS da mesma empresa antes da decisão.",
             }
@@ -106,6 +122,8 @@ def attention_points(
             {
                 "Prioridade": "ATENÇÃO",
                 "Tema": "Conciliação das entradas",
+                "O que significa": "A base usada para crédito não coincide com o total de entradas do mesmo mês.",
+                "Dados considerados": "Entradas do Demonstrativo Mensal menos a base de crédito da Simulação da Reforma.",
                 "Constatação": f"Demonstrativo mensal menos base de crédito: R$ {reconciliation:,.2f}",
                 "Ação": "Identificar acumuladores excluídos e confirmar quais aquisições geram crédito.",
             }
@@ -115,18 +133,24 @@ def attention_points(
             {
                 "Prioridade": "ATENÇÃO",
                 "Tema": "Dependência B2B estimada",
+                "O que significa": "Quanto maior a venda para empresas do regime regular, maior pode ser a importância do crédito transferido ao cliente.",
+                "Dados considerados": "Saídas totais menos o acumulador classificado como não contribuinte; é uma aproximação, não cadastro cliente a cliente.",
                 "Constatação": f"{report.percentual_operacoes_creditaveis:.2%} das saídas não estão no acumulador 'não contribuinte'.",
                 "Ação": "Validar com relatório por CNPJ/CPF; o acumulador é apenas uma proxy de crédito comercial.",
             },
             {
                 "Prioridade": "CRÍTICO",
                 "Tema": "Elegibilidade dos créditos",
+                "O que significa": "Nem toda entrada contábil necessariamente gera crédito aproveitável de IBS/CBS.",
+                "Dados considerados": "Base de entradas indicada pelo Domínio, antes da validação individual de documentos e operações.",
                 "Constatação": f"A simulação usa R$ {report.base_entradas_credito:,.2f} como base de entradas.",
                 "Ação": "Revisar brindes, uso/consumo, documentos inidôneos, pagamentos e operações com tratamento específico.",
             },
             {
                 "Prioridade": "ATENÇÃO",
                 "Tema": "Alíquotas futuras",
+                "O que significa": "O resultado de longo prazo muda quando as alíquotas de referência ou tratamentos da operação forem atualizados.",
+                "Dados considerados": "Alíquotas CBS e IBS cadastradas no relatório Domínio para o cenário 2033.",
                 "Constatação": (
                     f"Domínio: CBS {report.aliquota_cbs_2033:.2%} e IBS {report.aliquota_ibs_2033:.2%} em 2033."
                 ),
@@ -135,12 +159,16 @@ def attention_points(
             {
                 "Prioridade": "DECISÃO",
                 "Tema": "Opção 2027",
+                "O que significa": "Compara o custo tributário estimado do regime regular de IBS/CBS com a permanência integral no Simples.",
+                "Dados considerados": "DAS residual, CBS, IBS e total calculados pelo relatório Domínio para 2027.",
                 "Constatação": f"Híbrido varia R$ {report.fase_2027['diferenca']:,.2f} ({report.fase_2027['diferenca_percentual']:.2%}).",
                 "Ação": "Comparar o pequeno impacto de carga com retenção de clientes B2B e custo operacional.",
             },
             {
                 "Prioridade": "DECISÃO",
                 "Tema": "Cenário estrutural 2033",
+                "O que significa": "Mostra a direção econômica esperada quando a transição estiver concluída.",
+                "Dados considerados": "DAS residual, CBS, IBS, créditos e alíquotas do cenário 2033 informado pelo Domínio.",
                 "Constatação": f"Híbrido varia R$ {report.fase_2033['diferenca']:,.2f} ({report.fase_2033['diferenca_percentual']:.2%}).",
                 "Ação": "Planejar cadastro de itens, fornecedores, destinos, documentos e conciliação de créditos.",
             },
@@ -149,11 +177,111 @@ def attention_points(
     return points
 
 
+def dashboard_explanations(
+    report: DominioSimulationReport,
+    monthly: MonthlyReport,
+    pgdas: PGDASReport | None,
+    projection: FutureProjection,
+    lc214_simulation: SimplesLC214Simulation | None = None,
+) -> pd.DataFrame:
+    """Explica indicadores, cálculos e limitações em linguagem gerencial."""
+    compatible_pgdas = bool(pgdas and cnpjs_are_compatible(report.cnpj, pgdas))
+    period_rows = monthly.movimentos[
+        monthly.movimentos["Competência"].dt.to_period("M") == report.periodo.to_period("M")
+    ]
+    monthly_inputs = float(period_rows["Entradas"].sum()) if not period_rows.empty else 0.0
+    reconciliation = monthly_inputs - report.base_entradas_credito
+    rows = [
+        {
+            "Indicador": "Saídas analisadas",
+            "O que mostra": "Receita de vendas/serviços usada como base da competência selecionada.",
+            "Como foi obtido": "Base de débitos pelas saídas no relatório Simulação da Reforma.",
+            "Fonte ou premissa": "Domínio · competência mais recente importada.",
+            "Como interpretar": "É o denominador das cargas efetivas; não representa caixa ou lucro.",
+        },
+        {
+            "Indicador": "Base de entradas para crédito",
+            "O que mostra": "Montante de aquisições considerado potencialmente creditável.",
+            "Como foi obtido": "Base de créditos pelas entradas indicada na Simulação da Reforma.",
+            "Fonte ou premissa": "Domínio; depende de documento, operação e elegibilidade fiscal.",
+            "Como interpretar": "Não deve ser tratada como crédito definitivo antes da conciliação fiscal.",
+        },
+        {
+            "Indicador": "Compras potencialmente creditáveis",
+            "O que mostra": "Parcela das compras atuais considerada na base de crédito de IBS/CBS.",
+            "Como foi obtido": "Base de crédito das entradas ÷ entradas contábeis da mesma competência.",
+            "Fonte ou premissa": "Simulação da Reforma e Demonstrativo Mensal do Domínio.",
+            "Como interpretar": "Percentual alto aumenta o crédito potencial no Híbrido, mas exige validação por item e documento.",
+        },
+        {
+            "Indicador": "Atual / Por Dentro",
+            "O que mostra": "2026 e 2027 Por Dentro com a mesma carga efetiva quando a base, o Anexo e as segregações não mudam.",
+            "Como foi obtido": "Alíquota efetiva importada de 2026 aplicada à mesma base; em 2027 muda apenas a repartição interna do DAS.",
+            "Fonte ou premissa": f"Tributos atuais do {'PGDAS-D/Domínio conciliados' if compatible_pgdas else 'Domínio'}; tabela legal usada para a partilha.",
+            "Como interpretar": "Diferença zero na mesma base. Uma variação só deve surgir por mudança de receita, faixa, Anexo ou segregação.",
+        },
+        {
+            "Indicador": "Híbrido 2027 / Por Fora",
+            "O que mostra": "Custo de manter o Simples para os demais tributos e apurar CBS/IBS no regime regular.",
+            "Como foi obtido": "DAS residual + CBS líquida + IBS líquido calculados pelo Domínio.",
+            "Fonte ou premissa": "Cenário 2027 do relatório Simulação da Reforma e base de entradas para créditos.",
+            "Como interpretar": "Compare a diferença de carga com o benefício comercial dos créditos e o custo de controle.",
+        },
+        {
+            "Indicador": "Híbrido 2033",
+            "O que mostra": "Cenário estrutural após a transição, sujeito às alíquotas e regras futuras.",
+            "Como foi obtido": "DAS residual + CBS + IBS líquidos projetados pelo Domínio para 2033.",
+            "Fonte ou premissa": "Alíquotas 2033 existentes no arquivo importado.",
+            "Como interpretar": "É uma direção de planejamento, não uma apuração definitiva hoje.",
+        },
+        {
+            "Indicador": "Projeção anual 2027 e 2033",
+            "O que mostra": "Totais do ano-calendário de 2027 e cenário estrutural de 2033 com a mesma base anual.",
+            "Como foi obtido": f"Média dos últimos {projection.meses_media} meses, crescimento anual de {projection.crescimento_anual:.2%} e alíquota Por Dentro de {projection.aliquota_por_dentro:.2%}.",
+            "Fonte ou premissa": f"Demonstrativo Mensal; crescimento {'automático' if projection.modo_crescimento == 'average' else 'informado pelo usuário'}.",
+            "Como interpretar": "2033 mantém receita e compras de 2027 para que a diferença mostre o efeito tributário, não crescimento comercial de longo prazo.",
+        },
+        {
+            "Indicador": "Créditos na projeção",
+            "O que mostra": "Crédito estimado de CBS/IBS que a empresa poderá aproveitar nas compras.",
+            "Como foi obtido": "Compras projetadas × proporção atual da base creditável × alíquotas de crédito das entradas importadas do Domínio.",
+            "Fonte ou premissa": "Linha Créditos pelas Entradas da Simulação da Reforma.",
+            "Como interpretar": "No DAS Normal o crédito é zero; no Híbrido ele reduz CBS e IBS separadamente, sujeito à validação fiscal.",
+        },
+        {
+            "Indicador": "Sensibilidade das compras",
+            "O que mostra": "Se o Híbrido 2033 continua vantajoso quando a base de compras creditáveis muda.",
+            "Como foi obtido": "Mantém a receita e o DAS Normal da projeção anual e recalcula CBS/IBS para bases creditáveis de 50%, 70%, atual e 100% da receita.",
+            "Fonte ou premissa": "Alíquotas de débitos e créditos de 2033 importadas do Domínio.",
+            "Como interpretar": "Diferença negativa favorece o Híbrido; positiva favorece o DAS Normal. Compare a base atual com o ponto de equilíbrio.",
+        },
+        {
+            "Indicador": "Conciliação das entradas",
+            "O que mostra": "Diferença entre o movimento contábil de entradas e a base usada para crédito.",
+            "Como foi obtido": "Entradas do Demonstrativo Mensal - base de crédito da Simulação da Reforma.",
+            "Fonte ou premissa": f"Diferença da competência: R$ {reconciliation:,.2f}.",
+            "Como interpretar": "Diferença relevante deve ser explicada antes de decidir pelo regime por fora.",
+        },
+    ]
+    if lc214_simulation is not None:
+        rows.append(
+            {
+                "Indicador": "Nova tabela LC 214/2025",
+                "O que mostra": f"Simples 2027/2028 no Anexo {lc214_simulation.annex}, {lc214_simulation.bracket}ª faixa.",
+                "Como foi obtido": "(RBT12 × alíquota nominal - parcela a deduzir) ÷ RBT12, com repartição por tributo.",
+                "Fonte ou premissa": f"RBT12 de R$ {lc214_simulation.rbt12:,.2f}; taxa teórica da tabela {lc214_simulation.effective_rate:.2%}.",
+                "Como interpretar": "A taxa teórica serve para conferir faixa e partilha. A comparação 2026/2027 preserva a alíquota efetiva importada. No Anexo II, o IPI é mantido até norma específica em sentido diverso.",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def create_dashboard_images(
     report: DominioSimulationReport,
     monthly: MonthlyReport,
     pgdas: PGDASReport | None = None,
     projection: FutureProjection | None = None,
+    lc214_simulation: SimplesLC214Simulation | None = None,
 ) -> dict[str, bytes]:
     import os
     import tempfile
@@ -168,12 +296,14 @@ def create_dashboard_images(
     import matplotlib.pyplot as plt
     from matplotlib.ticker import FuncFormatter
 
-    scenarios = scenario_table(report)
-    projection = projection or build_future_projection([report], monthly)
+    scenarios = scenario_table(report, lc214_simulation)
+    projection = projection or build_future_projection(
+        [report], monthly, lc214_simulation=lc214_simulation
+    )
     images: dict[str, bytes] = {}
 
     fig, ax1 = plt.subplots(figsize=(12, 6.5), facecolor="white")
-    names = ["Atual", "Por Dentro\n(proxy)", "Híbrido\n2027", "Híbrido\n2033"]
+    names = ["2026 atual", "2027 Por Dentro\n(mesma carga)", "Híbrido\n2027", "Híbrido\n2033"]
     x = range(len(names))
     bars = ax1.bar(
         x,
@@ -190,10 +320,10 @@ def create_dashboard_images(
         ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 55, f"R$ {value:,.2f}", ha="center", fontsize=9)
     ax2 = ax1.twinx()
     ax2.plot(
-        list(x), scenarios["Crédito Potencial ao Cliente"], color=COLORS["red"], marker="o", linewidth=2.5,
-        label="Crédito potencial ao cliente",
+        list(x), scenarios["Crédito Estimado das Compras"], color=COLORS["red"], marker="o", linewidth=2.5,
+        label="Crédito estimado das compras",
     )
-    ax2.set_ylabel("Crédito potencial (R$)", color=COLORS["red"])
+    ax2.set_ylabel("Crédito estimado das compras (R$)", color=COLORS["red"])
     ax2.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"R$ {value:,.0f}"))
     fig.suptitle("Comparativo dos cenários tributários", fontsize=18, fontweight="bold", color=COLORS["navy"])
     ax1.set_title(f"{report.empresa} · competência {report.periodo:%m/%Y}", color=COLORS["slate"])
@@ -241,23 +371,50 @@ def create_dashboard_images(
     plt.close(fig)
     images["dashboard_pontos_atencao.png"] = buffer.getvalue()
 
-    projected = projection.projecao_mensal
+    annual = projection.resumo_anual
     fig, ax = plt.subplots(figsize=(12, 6.5), facecolor="white")
-    ax.plot(projected["Competência"], projected["Por Dentro"], marker="o", color=COLORS["blue"], label="Por Dentro")
-    ax.plot(projected["Competência"], projected["Híbrido 2027"], marker="o", color=COLORS["green"], label="Híbrido 2027")
-    ax.plot(projected["Competência"], projected["Híbrido 2033"], marker="o", color=COLORS["yellow"], label="Híbrido 2033")
+    x = list(range(len(annual)))
+    normal_positions = [value - 0.2 for value in x]
+    hybrid_positions = [value + 0.2 for value in x]
+    normal_bars = ax.bar(
+        normal_positions,
+        annual["DAS Normal · Valor"],
+        width=0.38,
+        color=COLORS["blue"],
+        label="DAS Normal",
+    )
+    hybrid_bars = ax.bar(
+        hybrid_positions,
+        annual["Híbrido · Total a Pagar"],
+        width=0.38,
+        color=COLORS["green"],
+        label="Híbrido",
+    )
+    for bars, rates in (
+        (normal_bars, annual["DAS Normal · Alíquota Efetiva"]),
+        (hybrid_bars, annual["Híbrido · Alíquota Efetiva"]),
+    ):
+        for bar, rate in zip(bars, rates):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f"{rate:.2%}",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+            )
+    ax.set_xticks(x, annual["Período"])
     ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"R$ {value:,.0f}"))
-    ax.grid(alpha=0.2)
-    ax.legend(frameon=False, ncol=3)
+    ax.grid(axis="y", alpha=0.2)
+    ax.legend(frameon=False, ncol=2)
     ax.set_title(
-        f"Projeção tributária futura — média de {projection.meses_media} meses · crescimento {'automático' if projection.modo_crescimento == 'average' else 'fixo'} {projection.crescimento_anual:.2%} a.a.",
+        "Projeção anual simplificada — total a pagar e alíquota efetiva",
         fontsize=18,
         fontweight="bold",
         color=COLORS["navy"],
     )
-    ax.set_xlabel("Competência projetada")
-    ax.set_ylabel("Carga tributária estimada")
-    fig.autofmt_xdate()
+    ax.set_xlabel("2027 completo e 2033 com a mesma base de 2027")
+    ax.set_ylabel("Total anual estimado")
     fig.tight_layout()
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
@@ -563,6 +720,8 @@ def build_excel_dashboard(
     projection: FutureProjection | None = None,
     intelligent_report: str | None = None,
     reports: Sequence[DominioSimulationReport] | None = None,
+    lc214_comparison: pd.DataFrame | None = None,
+    lc214_simulation: SimplesLC214Simulation | None = None,
 ) -> bytes:
     """Cria um XLSX autocontido usando XlsxWriter, com fórmulas e gráficos."""
     import xlsxwriter
@@ -571,19 +730,19 @@ def build_excel_dashboard(
     workbook = xlsxwriter.Workbook(output, {"in_memory": True})
     workbook.set_properties(
         {
-            "title": "Dashboard Reforma Tributária IBS/CBS",
+            "title": "Diagnóstico Nascel — Reforma Tributária IBS/CBS",
             "subject": "Simulação gerencial para optante do Simples Nacional",
-            "author": "Portal de Simulação IBS/CBS",
+            "author": NASCEL_NAME,
             "comments": "Premissas devem ser validadas conforme legislação e etapa de transição.",
         }
     )
     workbook.set_calc_mode("auto")
 
-    title = workbook.add_format({"bold": True, "font_size": 22, "font_color": "#123B5D"})
-    section = workbook.add_format({"bold": True, "font_size": 15, "font_color": "#123B5D"})
-    subtitle = workbook.add_format({"font_size": 11, "font_color": "#526579"})
+    title = workbook.add_format({"bold": True, "font_size": 22, "font_color": NASCEL_COLORS["navy"], "font_name": "Montserrat"})
+    section = workbook.add_format({"bold": True, "font_size": 15, "font_color": NASCEL_COLORS["navy"], "font_name": "Montserrat"})
+    subtitle = workbook.add_format({"font_size": 11, "font_color": NASCEL_COLORS["slate"], "font_name": "Montserrat"})
     header = workbook.add_format(
-        {"bold": True, "font_color": "white", "bg_color": "#123B5D", "align": "center", "valign": "vcenter", "border": 1, "border_color": "#D7E0E8"}
+        {"bold": True, "font_color": "white", "bg_color": NASCEL_COLORS["navy"], "align": "center", "valign": "vcenter", "border": 1, "border_color": NASCEL_COLORS["gold"], "font_name": "Montserrat"}
     )
     text = workbook.add_format({"border": 1, "border_color": "#D7E0E8", "valign": "top"})
     wrap = workbook.add_format({"border": 1, "border_color": "#D7E0E8", "valign": "top", "text_wrap": True})
@@ -591,22 +750,40 @@ def build_excel_dashboard(
     percent = workbook.add_format({"num_format": "0.00%", "border": 1, "border_color": "#D7E0E8"})
     date_format = workbook.add_format({"num_format": "mmm/yyyy", "border": 1, "border_color": "#D7E0E8"})
     input_percent = workbook.add_format({"num_format": "0.00%", "bg_color": "#FFF4CC", "border": 1, "border_color": "#D7E0E8"})
-    note = workbook.add_format({"font_color": "#526579", "italic": True, "text_wrap": True})
+    note = workbook.add_format({"font_color": NASCEL_COLORS["slate"], "italic": True, "text_wrap": True})
     recommendation_format = workbook.add_format(
-        {"bg_color": "#DFF3EC", "font_color": "#123B5D", "bold": True, "text_wrap": True, "valign": "top", "border": 1, "border_color": "#16A085"}
+        {"bg_color": NASCEL_COLORS["light_gold"], "font_color": NASCEL_COLORS["navy"], "bold": True, "text_wrap": True, "valign": "top", "border": 1, "border_color": NASCEL_COLORS["gold"]}
     )
     critical = workbook.add_format({"bg_color": "#FDE2E0", "font_color": "#9C0006", "bold": True, "border": 1})
     warning = workbook.add_format({"bg_color": "#FFF4CC", "font_color": "#9C6500", "bold": True, "border": 1})
-    decision = workbook.add_format({"bg_color": "#DCEAF7", "font_color": "#123B5D", "bold": True, "border": 1})
+    decision = workbook.add_format({"bg_color": NASCEL_COLORS["light_navy"], "font_color": NASCEL_COLORS["navy"], "bold": True, "border": 1})
+    guide_format = workbook.add_format(
+        {"bg_color": NASCEL_COLORS["cream"], "font_color": NASCEL_COLORS["navy"], "text_wrap": True, "valign": "vcenter", "border": 1, "border_color": NASCEL_COLORS["gold"]}
+    )
 
     reports = list(reports or [report])
-    projection = projection or build_future_projection(reports, monthly)
+    projection = projection or build_future_projection(
+        reports, monthly, lc214_simulation=lc214_simulation
+    )
     intelligent_report = intelligent_report or generate_local_intelligent_report(
         projection, reports, monthly, pgdas
     )
-    scenarios = scenario_table(report)
+    scenarios = scenario_table(report, lc214_simulation)
     points = attention_points(report, monthly, pgdas)
-    images = create_dashboard_images(report, monthly, pgdas, projection)
+    images = create_dashboard_images(
+        report, monthly, pgdas, projection, lc214_simulation
+    )
+    explanations = dashboard_explanations(report, monthly, pgdas, projection, lc214_simulation)
+    diagnostic = (
+        build_nascel_diagnostic(report, monthly, pgdas, reports, lc214_simulation)
+        if lc214_simulation is not None else None
+    )
+    decision_matrix = (
+        decision_matrix_frame(report, lc214_simulation)
+        if lc214_simulation is not None else pd.DataFrame()
+    )
+    legal_timeline = legal_timeline_frame()
+    official_sources = official_sources_frame()
 
     dashboard = workbook.add_worksheet("Dashboard")
     dashboard.hide_gridlines(2)
@@ -615,29 +792,35 @@ def build_excel_dashboard(
     dashboard.fit_to_pages(1, 2)
     dashboard.set_margins(0.3, 0.3, 0.4, 0.4)
     dashboard.set_column("A:L", 13)
-    dashboard.merge_range("A1:L2", "Dashboard Executivo — Reforma Tributária IBS/CBS", title)
+    dashboard.merge_range("A1:L2", "Diagnóstico Tributário — Grupo Nascel", title)
     dashboard.merge_range(
         "A3:L3", f"{report.empresa} | CNPJ {report.cnpj} | Competência {report.periodo:%m/%Y}", subtitle
     )
 
     kpi_formats = []
-    for color in ("#DCEAF7", "#DFF3EC", "#FFF4CC", "#FDE2E0" if report.fase_2027["diferenca"] > 0 else "#DFF3EC"):
+    for color in (NASCEL_COLORS["light_navy"], NASCEL_COLORS["cream"], NASCEL_COLORS["light_gold"], "#FDE2E0" if report.fase_2027["diferenca"] > 0 else NASCEL_COLORS["cream"]):
         kpi_formats.append(
             workbook.add_format(
-                {"bg_color": color, "font_color": "#123B5D", "bold": True, "font_size": 12, "align": "center", "valign": "vcenter", "text_wrap": True, "border": 1, "border_color": "#D7E0E8"}
+                {"bg_color": color, "font_color": NASCEL_COLORS["navy"], "bold": True, "font_size": 12, "align": "center", "valign": "vcenter", "text_wrap": True, "border": 1, "border_color": NASCEL_COLORS["gold"], "font_name": "Montserrat"}
             )
         )
     dashboard.set_row(4, 52)
     dashboard.merge_range("A5:C5", f"Saídas analisadas\nR$ {report.base_saidas:,.2f}", kpi_formats[0])
     dashboard.merge_range("D5:F5", f"Base de entradas\nR$ {report.base_entradas_credito:,.2f}", kpi_formats[1])
-    dashboard.merge_range("G5:I5", f"Operações potencialmente creditáveis\n{report.percentual_operacoes_creditaveis:.2%}", kpi_formats[2])
+    dashboard.merge_range("G5:I5", f"Compras potencialmente creditáveis\n{projection.percentual_entradas_creditaveis:.2%}", kpi_formats[2])
     dashboard.merge_range("J5:L5", f"Diferença 2027\n{report.fase_2027['diferenca_percentual']:.2%}", kpi_formats[3])
+    dashboard.set_row(5, 42)
+    dashboard.merge_range(
+        "A6:L6",
+        "Como ler: compare a alíquota e o total a pagar em cada cenário; depois confira o crédito estimado das compras e valide documentos, fornecedores e premissas.",
+        guide_format,
+    )
     dashboard.insert_image("A8", "dashboard_cenarios.png", {"image_data": io.BytesIO(images["dashboard_cenarios.png"]), "x_scale": 0.62, "y_scale": 0.62})
     dashboard.write("A32", "Recomendação executiva", section)
     recommendation = (
-        "Priorizar a análise do regime híbrido: o relatório do Domínio indica variação de "
-        f"{report.fase_2027['diferenca_percentual']:.2%} em 2027 e {report.fase_2033['diferenca_percentual']:.2%} em 2033, "
-        f"enquanto aproximadamente {report.percentual_operacoes_creditaveis:.2%} das saídas podem ser sensíveis a crédito. "
+        f"Índice de confiança {diagnostic.score}/100 — {diagnostic.status}. "
+        f"{diagnostic.recommendation} {diagnostic.rationale}"
+        if diagnostic is not None else
         "Condicionar a decisão à conciliação das entradas, validação por cliente e confirmação das alíquotas aplicáveis."
     )
     dashboard.merge_range("A33:L36", recommendation, recommendation_format)
@@ -648,6 +831,95 @@ def build_excel_dashboard(
         {"image_data": io.BytesIO(images["dashboard_projecao_futura.png"]), "x_scale": 0.62, "y_scale": 0.62},
     )
 
+    guide_sheet = workbook.add_worksheet("Como_Ler")
+    guide_sheet.freeze_panes(4, 1)
+    guide_sheet.hide_gridlines(2)
+    guide_sheet.set_column("A:A", 30)
+    guide_sheet.set_column("B:B", 55)
+    guide_sheet.set_column("C:C", 60)
+    guide_sheet.set_column("D:D", 55)
+    guide_sheet.set_column("E:E", 65)
+    guide_sheet.merge_range("A1:E1", "Como interpretar este dashboard", title)
+    guide_sheet.merge_range(
+        "A2:E2",
+        "O dashboard é uma ferramenta gerencial. Valores importados, cálculos do simulador e premissas são identificados separadamente para facilitar a revisão.",
+        guide_format,
+    )
+    guide_sheet.write_row(3, 0, list(explanations.columns), header)
+    for row_index, values in enumerate(explanations.itertuples(index=False, name=None), start=4):
+        guide_sheet.set_row(row_index, 72)
+        for column_index, value in enumerate(values):
+            guide_sheet.write(row_index, column_index, value, wrap)
+
+    if diagnostic is not None:
+        diagnostic_sheet = workbook.add_worksheet("Diagnostico_Nascel")
+        diagnostic_sheet.hide_gridlines(2)
+        diagnostic_sheet.set_column("A:A", 32)
+        diagnostic_sheet.set_column("B:C", 12)
+        diagnostic_sheet.set_column("D:D", 18)
+        diagnostic_sheet.set_column("E:F", 62)
+        diagnostic_sheet.merge_range("A1:F1", "Diagnóstico de confiança para a decisão", title)
+        diagnostic_sheet.merge_range(
+            "A2:F2",
+            f"Índice {diagnostic.score}/100 · {diagnostic.status} · {diagnostic.recommendation}",
+            recommendation_format,
+        )
+        diagnostic_sheet.write_row(3, 0, list(diagnostic.checklist.columns), header)
+        for row_index, values in enumerate(diagnostic.checklist.itertuples(index=False, name=None), start=4):
+            diagnostic_sheet.set_row(row_index, 48)
+            for column_index, value in enumerate(values):
+                diagnostic_sheet.write(row_index, column_index, value, wrap)
+
+        decision_sheet = workbook.add_worksheet("Decisao_Tributaria")
+        decision_sheet.hide_gridlines(2)
+        decision_sheet.set_column("A:A", 26)
+        decision_sheet.set_column("B:C", 60)
+        decision_sheet.set_column("D:E", 24)
+        decision_sheet.set_column("F:H", 62)
+        decision_sheet.merge_range("A1:H1", "Matriz Nascel — CBS/IBS dentro × fora do DAS", title)
+        decision_sheet.merge_range("A2:H2", NASCEL_TAGLINE, guide_format)
+        decision_sheet.write_row(3, 0, list(decision_matrix.columns), header)
+        for row_index, values in enumerate(decision_matrix.itertuples(index=False, name=None), start=4):
+            decision_sheet.set_row(row_index, 92)
+            for column_index, value in enumerate(values):
+                fmt = money if column_index in {3, 4} else wrap
+                decision_sheet.write(row_index, column_index, value, fmt)
+
+    timeline_sheet = workbook.add_worksheet("Cronograma_Legal")
+    timeline_sheet.hide_gridlines(2)
+    timeline_sheet.set_column("A:A", 16)
+    timeline_sheet.set_column("B:D", 62)
+    timeline_sheet.set_column("E:E", 54)
+    timeline_sheet.merge_range("A1:E1", "Cronograma legal e plano de preparação", title)
+    timeline_sheet.merge_range(
+        "A2:E2",
+        "Base informativa: LC 123/2006 e LC 214/2025, consideradas as alterações posteriores vigentes. Confirmar regulamentação e prazos antes da opção.",
+        guide_format,
+    )
+    timeline_sheet.write_row(3, 0, list(legal_timeline.columns), header)
+    for row_index, values in enumerate(legal_timeline.itertuples(index=False, name=None), start=4):
+        timeline_sheet.set_row(row_index, 76)
+        for column_index, value in enumerate(values):
+            timeline_sheet.write(row_index, column_index, value, wrap)
+
+    sources_sheet = workbook.add_worksheet("Fontes_Oficiais")
+    sources_sheet.hide_gridlines(2)
+    sources_sheet.set_column("A:A", 40)
+    sources_sheet.set_column("B:B", 68)
+    sources_sheet.set_column("C:C", 92)
+    sources_sheet.merge_range("A1:C1", "Fontes oficiais para conferência", title)
+    sources_sheet.merge_range(
+        "A2:C2",
+        "A simulação não congela a legislação. Consulte os textos compilados e a regulamentação vigente antes da decisão.",
+        guide_format,
+    )
+    sources_sheet.write_row(3, 0, list(official_sources.columns), header)
+    for row_index, values in enumerate(official_sources.itertuples(index=False, name=None), start=4):
+        sources_sheet.set_row(row_index, 46)
+        sources_sheet.write(row_index, 0, values[0], wrap)
+        sources_sheet.write(row_index, 1, values[1], wrap)
+        sources_sheet.write_url(row_index, 2, values[2], text)
+
     scenario_sheet = workbook.add_worksheet("Cenarios")
     scenario_sheet.freeze_panes(1, 0)
     scenario_sheet.set_column("A:A", 32)
@@ -655,7 +927,7 @@ def build_excel_dashboard(
     scenario_sheet.set_column("F:F", 68)
     columns = [
         {"header": "Cenário"}, {"header": "Carga Tributária", "format": money},
-        {"header": "Carga Efetiva", "format": percent}, {"header": "Crédito Potencial ao Cliente", "format": money},
+        {"header": "Carga Efetiva", "format": percent}, {"header": "Crédito Estimado das Compras", "format": money},
         {"header": "Variação vs. Atual", "format": money}, {"header": "Leitura"},
     ]
     scenario_sheet.add_table(
@@ -664,13 +936,54 @@ def build_excel_dashboard(
     )
     chart = workbook.add_chart({"type": "column"})
     chart.add_series(
-        {"name": "Carga tributária", "categories": "=Cenarios!$A$2:$A$5", "values": "=Cenarios!$B$2:$B$5", "fill": {"color": "#2F80ED"}, "data_labels": {"value": True, "num_format": "R$ #,##0"}}
+        {"name": "Carga tributária", "categories": "=Cenarios!$A$2:$A$5", "values": "=Cenarios!$B$2:$B$5", "fill": {"color": NASCEL_COLORS["gold"]}, "border": {"color": NASCEL_COLORS["navy"]}, "data_labels": {"value": True, "num_format": "R$ #,##0"}}
     )
     chart.set_title({"name": "Carga tributária por cenário"})
     chart.set_y_axis({"name": "R$", "num_format": "R$ #,##0"})
     chart.set_legend({"none": True})
     chart.set_size({"width": 820, "height": 420})
     scenario_sheet.insert_chart("A8", chart)
+
+    if lc214_comparison is not None and lc214_simulation is not None:
+        lc214_sheet = workbook.add_worksheet("Simples_LC214")
+        lc214_sheet.freeze_panes(6, 1)
+        lc214_sheet.set_column("A:A", 18)
+        lc214_sheet.set_column("B:D", 25)
+        lc214_sheet.set_column("E:F", 26)
+        lc214_sheet.merge_range(
+            "A1:F1", "Simples Nacional 2027/2028 — LC 214/2025", title
+        )
+        lc214_sheet.write_row(
+            2,
+            0,
+            ["Anexo", "Faixa", "RBT12", "Alíquota nominal", "Taxa teórica da tabela", "Alíquota preservada 2026/2027"],
+            header,
+        )
+        lc214_sheet.write(3, 0, lc214_simulation.annex, text)
+        lc214_sheet.write(3, 1, lc214_simulation.bracket, text)
+        lc214_sheet.write(3, 2, lc214_simulation.rbt12, money)
+        lc214_sheet.write(3, 3, lc214_simulation.nominal_rate, percent)
+        lc214_sheet.write(3, 4, lc214_simulation.effective_rate, percent)
+        preserved_rate = report.tributos_atuais["Total"] / report.base_saidas if report.base_saidas else 0.0
+        lc214_sheet.write(3, 5, preserved_rate, percent)
+        lc214_sheet.write_row(5, 0, list(lc214_comparison.columns), header)
+        for row_index, values in enumerate(
+            lc214_comparison.itertuples(index=False, name=None), start=6
+        ):
+            for column_index, value in enumerate(values):
+                if column_index in {1, 2, 3}:
+                    fmt = money
+                elif values[0] == "Total":
+                    fmt = decision
+                else:
+                    fmt = wrap if column_index == 4 else text
+                lc214_sheet.write(row_index, column_index, value, fmt)
+        lc214_sheet.write(
+            len(lc214_comparison) + 8,
+            0,
+            "2027 Por Dentro preserva a carga efetiva de 2026 na mesma base; muda a partilha interna. No Anexo II, o IPI permanece conforme a tabela oficial, sem troca automática de Anexo.",
+            note,
+        )
 
     assumptions_sheet = workbook.add_worksheet("Premissas")
     assumptions_sheet.set_column("A:A", 34)
@@ -705,49 +1018,202 @@ def build_excel_dashboard(
     assumptions_sheet.data_validation("B8:B9", {"validate": "decimal", "criteria": "between", "minimum": 0, "maximum": 1, "input_title": "Premissa editável", "input_message": "Informe um percentual entre 0% e 100%."})
 
     sensitivity = workbook.add_worksheet("Sensibilidade")
-    sensitivity.set_column("A:A", 24)
-    sensitivity.set_column("B:E", 21)
-    sensitivity.merge_range("A1:E1", "Sensibilidade — Híbrido 2033 vs. Por Dentro", title)
-    sensitivity.write("A3", "Crescimento da receita", header)
-    credit_ratios = [0.50, 0.70, report.base_entradas_credito / report.base_saidas, 1.00]
-    for column, ratio in enumerate(credit_ratios, start=1):
-        sensitivity.write(2, column, ratio, header)
-        sensitivity.set_column(column, column, 20)
-    growth_rates = [-0.10, 0.0, 0.10, 0.25]
-    for row, growth in enumerate(growth_rates, start=3):
-        sensitivity.write(row, 0, growth, percent)
-        for column in range(1, 5):
-            column_letter = xlsxwriter.utility.xl_col_to_name(column)
-            formula = (
-                f"=Premissas!$B$2*(1+$A{row + 1})*Premissas!$B$5+"
-                f"MAX(Premissas!$B$2*(1+$A{row + 1})*(Premissas!$B$6+Premissas!$B$7)-"
-                f"Premissas!$B$2*(1+$A{row + 1})*{column_letter}$3*(Premissas!$B$6+Premissas!$B$7),0)-"
-                f"Premissas!$B$2*(1+$A{row + 1})*Premissas!$B$4"
-            )
-            sensitivity.write_formula(row, column, formula, money, 0)
-    sensitivity.conditional_format("B4:E7", {"type": "3_color_scale", "min_color": "#63BE7B", "mid_color": "#FFEB84", "max_color": "#F8696B"})
-    sensitivity.merge_range("A10:E11", "Valores negativos favorecem o híbrido; positivos favorecem o Por Dentro, antes dos efeitos comerciais.", note)
+    sensitivity.hide_gridlines(2)
+    sensitivity.freeze_panes(9, 0)
+    sensitivity.set_column("A:A", 31)
+    sensitivity.set_column("B:B", 20)
+    sensitivity.set_column("C:I", 22)
+    sensitivity.set_column("J:J", 31)
+    sensitivity.set_row(1, 28)
+    sensitivity.set_row(2, 28)
+    sensitivity.set_row(4, 28)
+    sensitivity.set_row(5, 28)
+    sensitivity.set_row(6, 32)
+    sensitivity.set_row(8, 42)
+    for sensitivity_row in range(9, 13):
+        sensitivity.set_row(sensitivity_row, 30)
+    for sensitivity_row in range(14, 17):
+        sensitivity.set_row(sensitivity_row, 24)
+    sensitivity.merge_range(
+        "A1:J1", "Sensibilidade das compras — Híbrido 2033 vs. DAS Normal", title
+    )
+    sensitivity.merge_range(
+        "A2:J3",
+        "FINALIDADE: verificar se a decisão muda quando a base de compras apta a gerar crédito de IBS/CBS fica menor ou maior. "
+        "A receita anual e a alíquota do DAS Normal permanecem iguais à projeção de 2027; varia somente a base creditável das compras.",
+        guide_format,
+    )
+
+    annual_2033 = projection.resumo_anual.iloc[1]
+    annual_revenue = float(annual_2033["Receita Projetada"])
+    normal_total = float(annual_2033["DAS Normal · Valor"])
+    current_credit_ratio = (
+        float(annual_2033["Base Creditável das Compras"]) / annual_revenue
+        if annual_revenue
+        else 0.0
+    )
+    report_output_base = sum(item.base_saidas for item in reports)
+    report_input_base = sum(item.base_entradas_credito for item in reports)
+
+    def output_rate(attribute: str) -> float:
+        return (
+            sum(item.base_saidas * getattr(item, attribute) for item in reports)
+            / report_output_base
+            if report_output_base
+            else 0.0
+        )
+
+    def input_rate(attribute: str) -> float:
+        return (
+            sum(item.base_entradas_credito * getattr(item, attribute) for item in reports)
+            / report_input_base
+            if report_input_base
+            else 0.0
+        )
+
+    residual_rate = (
+        sum(item.fase_2033["simples_residual"] for item in reports)
+        / report_output_base
+        if report_output_base
+        else 0.0
+    )
+    output_cbs_rate = output_rate("aliquota_cbs_2033")
+    output_ibs_rate = output_rate("aliquota_ibs_2033")
+    input_cbs_rate = input_rate("aliquota_credito_cbs_2033")
+    input_ibs_rate = input_rate("aliquota_credito_ibs_2033")
+
+    def sensitivity_values(ratio: float) -> dict[str, float]:
+        credit_base = annual_revenue * ratio
+        purchase_credit = credit_base * (input_cbs_rate + input_ibs_rate)
+        residual = annual_revenue * residual_rate
+        cbs = max(annual_revenue * output_cbs_rate - credit_base * input_cbs_rate, 0.0)
+        ibs = max(annual_revenue * output_ibs_rate - credit_base * input_ibs_rate, 0.0)
+        hybrid = residual + cbs + ibs
+        return {
+            "base": credit_base,
+            "credit": purchase_credit,
+            "residual": residual,
+            "cbs": cbs,
+            "ibs": ibs,
+            "hybrid": hybrid,
+            "difference": hybrid - normal_total,
+        }
+
+    low, high = 0.0, 2.0
+    if sensitivity_values(high)["difference"] <= 0:
+        for _ in range(80):
+            middle = (low + high) / 2
+            if sensitivity_values(middle)["difference"] > 0:
+                low = middle
+            else:
+                high = middle
+        break_even_ratio = high
+    else:
+        break_even_ratio = None
+
+    current_values = sensitivity_values(current_credit_ratio)
+    current_reading = (
+        f"Híbrido menor em R$ {abs(current_values['difference']):,.2f}"
+        if current_values["difference"] < 0
+        else f"DAS Normal menor em R$ {current_values['difference']:,.2f}"
+        if current_values["difference"] > 0
+        else "Empate entre os regimes"
+    )
+    sensitivity.merge_range("A5:C6", f"Base creditável atual\n{current_credit_ratio:.2%} da receita", decision)
+    sensitivity.merge_range(
+        "D5:F6",
+        f"Ponto de equilíbrio\n{break_even_ratio:.2%} da receita"
+        if break_even_ratio is not None
+        else "Ponto de equilíbrio\nAcima de 200% da receita",
+        warning,
+    )
+    sensitivity.merge_range("G5:J6", f"Leitura da base atual\n{current_reading}", recommendation_format)
+    sensitivity.merge_range(
+        "A7:J7",
+        "COMO LER: diferença negativa = Híbrido paga menos; diferença positiva = DAS Normal paga menos. "
+        "A linha 'Base atual da empresa' reproduz a estrutura de compras importada.",
+        note,
+    )
+
+    sensitivity_headers = [
+        "Cenário",
+        "Base Creditável / Receita",
+        "Base Creditável (R$)",
+        "Crédito das Compras (R$)",
+        "DAS Residual (R$)",
+        "CBS Líquida (R$)",
+        "IBS Líquido (R$)",
+        "Total Híbrido (R$)",
+        "Diferença vs. DAS Normal",
+        "Interpretação",
+    ]
+    sensitivity.write_row(8, 0, sensitivity_headers, header)
+    ratio_scenarios = [
+        ("Compras creditáveis baixas", 0.50),
+        ("Compras creditáveis médias", 0.70),
+        ("Base atual da empresa", current_credit_ratio),
+        ("Compras creditáveis altas", 1.00),
+    ]
+    for row_index, (label, ratio) in enumerate(ratio_scenarios, start=9):
+        values = sensitivity_values(ratio)
+        interpretation = (
+            "Híbrido paga menos"
+            if values["difference"] < 0
+            else "DAS Normal paga menos"
+            if values["difference"] > 0
+            else "Empate"
+        )
+        sensitivity.write(row_index, 0, label, decision if label == "Base atual da empresa" else text)
+        sensitivity.write(row_index, 1, ratio, percent)
+        for column, key in enumerate(
+            ("base", "credit", "residual", "cbs", "ibs", "hybrid", "difference"),
+            start=2,
+        ):
+            sensitivity.write(row_index, column, values[key], money)
+        sensitivity.write(row_index, 9, interpretation, wrap)
+    sensitivity.conditional_format(
+        "I10:I13",
+        {"type": "cell", "criteria": "<", "value": 0, "format": workbook.add_format({"bg_color": "#C6EFCE", "font_color": "#006100", "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'})},
+    )
+    sensitivity.conditional_format(
+        "I10:I13",
+        {"type": "cell", "criteria": ">", "value": 0, "format": workbook.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006", "num_format": 'R$ #,##0.00;[Red]-R$ #,##0.00'})},
+    )
+    sensitivity.merge_range(
+        "A15:J17",
+        "LIMITAÇÃO: esta aba é uma análise gerencial. O crédito efetivo depende de documento fiscal idôneo, "
+        "extinção do débito, vedações, reduções e demais regras aplicáveis. CBS e IBS são calculados separadamente.",
+        note,
+    )
 
     projection_sheet = workbook.add_worksheet("Projecao_Futura")
     projection_sheet.freeze_panes(1, 0)
-    projection_sheet.set_column("A:A", 16)
-    projection_sheet.set_column("B:J", 21)
-    projection_columns = list(projection.projecao_mensal.columns)
+    projection_sheet.set_column("A:A", 20)
+    projection_sheet.set_column("B:M", 24)
+    projection_columns = list(projection.resumo_anual.columns)
     projection_sheet.write_row(0, 0, projection_columns, header)
     for row_index, values in enumerate(
-        projection.projecao_mensal.itertuples(index=False, name=None), start=1
+        projection.resumo_anual.itertuples(index=False, name=None), start=1
     ):
         for column, value in enumerate(values):
+            column_name = projection_columns[column]
+            cell_format = (
+                text
+                if column_name == "Período"
+                else percent
+                if "Alíquota" in column_name
+                else money
+            )
             projection_sheet.write(
                 row_index,
                 column,
-                value.to_pydatetime() if column == 0 else value,
-                date_format if column == 0 else money,
+                value,
+                cell_format,
             )
     projection_sheet.add_table(
         0,
         0,
-        len(projection.projecao_mensal),
+        len(projection.resumo_anual),
         len(projection_columns) - 1,
         {
             "name": "TabelaProjecaoFutura",
@@ -755,21 +1221,24 @@ def build_excel_dashboard(
             "columns": [{"header": column} for column in projection_columns],
         },
     )
-    projection_chart = workbook.add_chart({"type": "line"})
-    for column, color in ((3, "#2F80ED"), (4, "#16A085"), (5, "#F2C94C")):
+    projection_chart = workbook.add_chart({"type": "column"})
+    for column_name, color in (
+        ("DAS Normal · Valor", NASCEL_COLORS["navy"]),
+        ("Híbrido · Total a Pagar", NASCEL_COLORS["gold"]),
+    ):
+        column = projection_columns.index(column_name)
         projection_chart.add_series(
             {
                 "name": ["Projecao_Futura", 0, column],
-                "categories": ["Projecao_Futura", 1, 0, len(projection.projecao_mensal), 0],
-                "values": ["Projecao_Futura", 1, column, len(projection.projecao_mensal), column],
-                "line": {"color": color, "width": 2.25},
-                "marker": {"type": "circle", "size": 4},
+                "categories": ["Projecao_Futura", 1, 0, len(projection.resumo_anual), 0],
+                "values": ["Projecao_Futura", 1, column, len(projection.resumo_anual), column],
+                "fill": {"color": color},
             }
         )
-    projection_chart.set_title({"name": "Carga projetada por opção"})
+    projection_chart.set_title({"name": "Total anual: DAS Normal x Híbrido"})
     projection_chart.set_y_axis({"num_format": "R$ #,##0"})
     projection_chart.set_size({"width": 900, "height": 420})
-    projection_sheet.insert_chart("L2", projection_chart)
+    projection_sheet.insert_chart("A6", projection_chart)
 
     history_sheet = workbook.add_worksheet("Historico_Simulacoes")
     history_sheet.freeze_panes(1, 0)
@@ -787,7 +1256,7 @@ def build_excel_dashboard(
     ai_sheet = workbook.add_worksheet("Relatorio_Inteligente")
     ai_sheet.hide_gridlines(2)
     ai_sheet.set_column("A:H", 16)
-    ai_sheet.merge_range("A1:H2", "Relatório Inteligente de Possibilidades", title)
+    ai_sheet.merge_range("A1:H2", "Relatório Consultivo Nascel", title)
     ai_sheet.merge_range("A4:H45", intelligent_report, workbook.add_format({"text_wrap": True, "valign": "top", "font_size": 11, "border": 1, "border_color": "#D7E0E8"}))
 
     monthly_sheet = workbook.add_worksheet("Evolucao_Mensal")
@@ -803,7 +1272,7 @@ def build_excel_dashboard(
         },
     )
     line = workbook.add_chart({"type": "line"})
-    for column, color in ((2, "#16A085"), (3, "#2F80ED")):
+    for column, color in ((2, NASCEL_COLORS["gold"]), (3, NASCEL_COLORS["navy"])):
         line.add_series({"name": ["Evolucao_Mensal", 0, column - 1], "categories": ["Evolucao_Mensal", 1, 0, len(monthly.movimentos), 0], "values": ["Evolucao_Mensal", 1, column - 1, len(monthly.movimentos), column - 1], "line": {"color": color, "width": 2.25}, "marker": {"type": "circle", "size": 5}})
     line.set_title({"name": "Evolução mensal de entradas e saídas"})
     line.set_y_axis({"num_format": "R$ #,##0"})
@@ -836,16 +1305,23 @@ def build_excel_dashboard(
     attention.freeze_panes(1, 0)
     attention.set_column("A:A", 14)
     attention.set_column("B:B", 28)
-    attention.set_column("C:C", 55)
-    attention.set_column("D:D", 75)
-    attention.write_row(0, 0, ["Prioridade", "Tema", "Constatação", "Ação recomendada"], header)
+    attention.set_column("C:D", 58)
+    attention.set_column("E:E", 55)
+    attention.set_column("F:F", 75)
+    attention.write_row(
+        0, 0,
+        ["Prioridade", "Tema", "O que significa", "Dados considerados", "Constatação", "Ação recomendada"],
+        header,
+    )
     priority_formats = {"CRÍTICO": critical, "ATENÇÃO": warning, "DECISÃO": decision}
     for row_index, point in enumerate(points, start=1):
-        attention.set_row(row_index, 46)
+        attention.set_row(row_index, 82)
         attention.write(row_index, 0, point["Prioridade"], priority_formats.get(point["Prioridade"], text))
         attention.write(row_index, 1, point["Tema"], wrap)
-        attention.write(row_index, 2, point["Constatação"], wrap)
-        attention.write(row_index, 3, point["Ação"], wrap)
+        attention.write(row_index, 2, point["O que significa"], wrap)
+        attention.write(row_index, 3, point["Dados considerados"], wrap)
+        attention.write(row_index, 4, point["Constatação"], wrap)
+        attention.write(row_index, 5, point["Ação"], wrap)
 
     raw = workbook.add_worksheet("Dados_Dominio")
     raw.set_column("A:A", 62)
@@ -902,18 +1378,18 @@ def build_transactional_template() -> bytes:
 
     output = io.BytesIO()
     workbook = xlsxwriter.Workbook(output, {"in_memory": True})
-    title = workbook.add_format({"bold": True, "font_size": 18, "font_color": "#123B5D"})
-    header = workbook.add_format({"bold": True, "font_color": "white", "bg_color": "#123B5D", "border": 1, "align": "center"})
+    title = workbook.add_format({"bold": True, "font_size": 18, "font_color": NASCEL_COLORS["navy"], "font_name": "Montserrat"})
+    header = workbook.add_format({"bold": True, "font_color": "white", "bg_color": NASCEL_COLORS["navy"], "border": 1, "border_color": NASCEL_COLORS["gold"], "align": "center", "font_name": "Montserrat"})
     input_format = workbook.add_format({"bg_color": "#FFF4CC", "border": 1})
     date_format = workbook.add_format({"num_format": "dd/mm/yyyy", "bg_color": "#FFF4CC", "border": 1})
     money_format = workbook.add_format({"num_format": 'R$ #,##0.00', "bg_color": "#FFF4CC", "border": 1})
     percent_format = workbook.add_format({"num_format": "0.00%", "bg_color": "#FFF4CC", "border": 1})
-    note = workbook.add_format({"text_wrap": True, "valign": "top", "font_color": "#526579"})
+    note = workbook.add_format({"text_wrap": True, "valign": "top", "font_color": NASCEL_COLORS["slate"]})
 
     instructions = workbook.add_worksheet("Instrucoes")
     instructions.set_column("A:A", 28)
     instructions.set_column("B:B", 100)
-    instructions.merge_range("A1:B2", "Modelo de Importação — Portal IBS/CBS", title)
+    instructions.merge_range("A1:B2", "Modelo de Importação — Grupo Nascel", title)
     instruction_rows = [
         ("Faturamento", "Uma linha por documento/operação. Preserve zeros à esquerda no CPF/CNPJ."),
         ("Entradas", "Informe a base potencial de crédito já conciliada; o portal ainda sinalizará a necessidade de validação fiscal."),

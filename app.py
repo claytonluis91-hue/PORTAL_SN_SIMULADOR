@@ -1,4 +1,4 @@
-"""Portal de Simulação da Reforma Tributária (IBS/CBS).
+"""Diagnóstico Nascel da Reforma Tributária (IBS/CBS).
 
 Aplicação Streamlit para comparar o Simples Nacional "por dentro" com a
 opção híbrida. As premissas editáveis são deliberadamente exibidas na tela:
@@ -23,15 +23,18 @@ import streamlit as st
 from analytics_engine import (
     AnalyticsError,
     FutureProjection,
+    GEMINI_MODEL_PREFERENCE,
     build_future_projection,
     generate_local_intelligent_report,
     generate_report_with_gemini,
+    list_gemini_models,
 )
 from dashboard_exports import (
     attention_points,
     build_excel_dashboard,
     build_transactional_template,
     create_dashboard_images,
+    dashboard_explanations,
     scenario_table,
 )
 from dominio_importers import (
@@ -41,8 +44,23 @@ from dominio_importers import (
     PGDASReport,
     cnpjs_are_compatible,
     parse_dominio_monthly,
-    parse_dominio_simulation,
+    parse_dominio_simulations,
     parse_pgdas,
+)
+from simples_lc214 import (
+    SimplesLC214Error,
+    SimplesLC214Simulation,
+    simulate_lc214_2027_2028,
+    tax_comparison_frame,
+)
+from nascel_consulting import (
+    NASCEL_COLORS,
+    NASCEL_LOGO_URL,
+    NASCEL_TAGLINE,
+    build_nascel_diagnostic,
+    decision_matrix_frame,
+    legal_timeline_frame,
+    official_sources_frame,
 )
 
 
@@ -495,13 +513,14 @@ def build_pdf(result: SimulationResult, inputs: SimulationInputs) -> bytes:
         leftMargin=18 * mm,
         topMargin=16 * mm,
         bottomMargin=16 * mm,
-        title="Simulação da Reforma Tributária - IBS/CBS",
+        title="Diagnóstico Nascel - Reforma Tributária IBS/CBS",
     )
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="CenteredTitle", parent=styles["Title"], alignment=TA_CENTER, textColor=colors.HexColor("#123B5D")))
+    styles.add(ParagraphStyle(name="CenteredTitle", parent=styles["Title"], alignment=TA_CENTER, textColor=colors.HexColor(NASCEL_COLORS["navy"])))
     story: list[object] = [
-        Paragraph("Simulação da Reforma Tributária", styles["CenteredTitle"]),
-        Paragraph("Simples Nacional — IBS/CBS", styles["Heading2"]),
+        Paragraph("GRUPO NASCEL | NASCEL CONTABILIDADE", styles["CenteredTitle"]),
+        Paragraph("Diagnóstico da Reforma Tributária — Simples Nacional", styles["Heading2"]),
+        Paragraph(NASCEL_TAGLINE, styles["Italic"]),
         Paragraph(f"Relatório gerado em {datetime.now():%d/%m/%Y às %H:%M}", styles["Normal"]),
         Spacer(1, 8 * mm),
     ]
@@ -513,11 +532,11 @@ def build_pdf(result: SimulationResult, inputs: SimulationInputs) -> bytes:
     ]
     table = Table(summary, colWidths=[65 * mm, 48 * mm, 48 * mm])
     table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#123B5D")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(NASCEL_COLORS["navy"])),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-        ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#F8FAFC")),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor(NASCEL_COLORS["cream"])),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("PADDING", (0, 0), (-1, -1), 7),
     ]))
@@ -541,7 +560,7 @@ def build_pdf(result: SimulationResult, inputs: SimulationInputs) -> bytes:
     detail_table = Table(details, colWidths=[80 * mm, 81 * mm])
     detail_table.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
-        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#E8F0F7")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor(NASCEL_COLORS["light_gold"])),
         ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
         ("PADDING", (0, 0), (-1, -1), 6),
     ]))
@@ -549,6 +568,14 @@ def build_pdf(result: SimulationResult, inputs: SimulationInputs) -> bytes:
         Paragraph(f"Recomendação: {result.recomendacao}", styles["Heading2"]),
         Paragraph(result.justificativa, styles["BodyText"]),
         Spacer(1, 6 * mm),
+        Paragraph("Como interpretar", styles["Heading2"]),
+        Paragraph(
+            "Por Dentro prioriza simplicidade e tende a atender melhor operações com consumidor final. "
+            "O Híbrido pode fortalecer a cadeia B2B, mas exige validar créditos das entradas, documentos, "
+            "preço, margem e capital de giro. Compare o efeito líquido, não apenas a alíquota nominal.",
+            styles["BodyText"],
+        ),
+        Spacer(1, 5 * mm),
         Paragraph("Premissas e dados consolidados", styles["Heading2"]),
         detail_table,
         Spacer(1, 6 * mm),
@@ -570,7 +597,7 @@ def comparison_chart(result: SimulationResult) -> go.Figure:
         name="Custo tributário",
         x=["Por Dentro", "Híbrido"],
         y=[result.cenario_1_das, result.cenario_2_total],
-        marker_color=["#2F80ED", "#16A085"],
+        marker_color=[NASCEL_COLORS["navy"], NASCEL_COLORS["gold"]],
         text=[brl(result.cenario_1_das), brl(result.cenario_2_total)],
         textposition="outside",
     )
@@ -589,7 +616,7 @@ def credit_chart(result: SimulationResult, reference_rate: float) -> go.Figure:
     figure = go.Figure(go.Bar(
         x=["Por Dentro", "Híbrido"],
         y=[result.cenario_1_credito_repassado, hybrid_credit],
-        marker_color=["#7B61FF", "#F2C94C"],
+        marker_color=[NASCEL_COLORS["navy"], NASCEL_COLORS["gold"]],
         text=[brl(result.cenario_1_credito_repassado), brl(hybrid_credit)],
         textposition="outside",
     ))
@@ -614,10 +641,23 @@ def inject_styles() -> None:
     st.markdown(
         """
         <style>
-        .block-container {max-width: 1200px; padding-top: 2rem; padding-bottom: 3rem;}
-        [data-testid="stMetric"] {background: #f7fafc; border: 1px solid #dbe5ee; padding: 1rem; border-radius: 12px;}
-        .recommendation {padding: 1.2rem 1.4rem; border-radius: 12px; background: #eaf7f2; border-left: 6px solid #16a085;}
-        .subtitle {color: #526579; margin-top: -0.7rem;}
+        :root {--nascel-navy:#16163F; --nascel-gold:#F9AF44; --nascel-cream:#F8F3EC; --nascel-border:#E6E2DC; --nascel-muted:#626277;}
+        html, body, [class*="css"] {font-family: "Montserrat", "Segoe UI", Arial, sans-serif;}
+        .block-container {max-width: 1180px; padding-top: 1.5rem; padding-bottom: 3rem;}
+        [data-testid="stMetric"] {background:#FFFFFF; border:1px solid var(--nascel-border); border-top:3px solid var(--nascel-gold); padding:1rem 1.05rem; border-radius:12px; box-shadow:0 3px 12px rgba(22,22,63,.05); min-height:132px;}
+        [data-testid="stMetricLabel"] {color:var(--nascel-muted); font-weight:650; line-height:1.3; white-space:normal;}
+        [data-testid="stMetricValue"] {color:var(--nascel-navy); font-variant-numeric:tabular-nums; letter-spacing:-.025em;}
+        .nascel-brand {display:flex; align-items:center; justify-content:space-between; gap:2rem; padding:1.25rem 1.5rem; background:var(--nascel-navy); border-bottom:5px solid var(--nascel-gold); border-radius:12px; margin-bottom:1.2rem;}
+        .nascel-brand img {width:190px; max-width:38%; height:auto;}
+        .nascel-brand-copy {color:#FFFFFF; text-align:right; font-size:.95rem; line-height:1.45;}
+        .nascel-brand-copy strong {display:block; color:var(--nascel-gold); text-transform:uppercase; letter-spacing:.08em; font-size:.76rem;}
+        .recommendation {padding:1.2rem 1.4rem; border-radius:12px; background:#FFF8EA; border:1px solid #F2D59F; border-left:5px solid var(--nascel-gold); color:var(--nascel-navy);}
+        .subtitle {color: #5B5B6E; margin-top: -0.7rem;}
+        h1, h2, h3 {color:var(--nascel-navy); letter-spacing:-.025em;}
+        h2 {margin-top:2rem; padding-top:.25rem;}
+        div[data-testid="stExpander"] {border-color:var(--nascel-border); border-radius:10px;}
+        [data-testid="stDataFrame"] {border:1px solid var(--nascel-border); border-radius:10px; overflow:hidden;}
+        @media (max-width: 700px) {.nascel-brand {align-items:flex-start; flex-direction:column;} .nascel-brand-copy {text-align:left;} .nascel-brand img {max-width:70%;}}
         </style>
         """,
         unsafe_allow_html=True,
@@ -639,6 +679,15 @@ def get_streamlit_secret(name: str, default: str = "") -> str:
         return os.getenv(name, default)
 
 
+def get_gemini_api_key() -> tuple[str, str]:
+    """Obtém a chave sem exibi-la; GOOGLE_API_KEY tem a precedência oficial."""
+    for name in ("GOOGLE_API_KEY", "GEMINI_API_KEY"):
+        value = get_streamlit_secret(name)
+        if value:
+            return value, name
+    return "", ""
+
+
 def render_dominio_results(
     report: DominioSimulationReport,
     monthly: MonthlyReport,
@@ -646,6 +695,8 @@ def render_dominio_results(
     reports: list[DominioSimulationReport],
     projection: FutureProjection,
     intelligent_report: str,
+    lc214_simulation: SimplesLC214Simulation,
+    lc214_comparison: pd.DataFrame,
 ) -> None:
     st.success(
         f"Relatórios reconhecidos: {report.empresa} · CNPJ {format_cnpj(report.cnpj)} · "
@@ -669,39 +720,108 @@ def render_dominio_results(
     ]
     monthly_inputs = float(period_rows["Entradas"].sum()) if not period_rows.empty else 0.0
     reconciliation = monthly_inputs - report.base_entradas_credito
+    purchase_creditable_ratio = (
+        min(max(report.base_entradas_credito / monthly_inputs, 0.0), 1.0)
+        if monthly_inputs > 0
+        else 0.0
+    )
 
-    st.subheader("Resultado consolidado do Domínio")
-    metrics = st.columns(5)
-    metrics[0].metric("Saídas analisadas", brl(report.base_saidas))
-    metrics[1].metric("Base de entradas", brl(report.base_entradas_credito))
-    metrics[2].metric("Operações potencialmente creditáveis", pct(report.percentual_operacoes_creditaveis))
-    metrics[3].metric(
+    explanations = dashboard_explanations(
+        report, monthly, pgdas_report, projection, lc214_simulation
+    )
+    diagnostic = build_nascel_diagnostic(
+        report, monthly, pgdas_report, reports, lc214_simulation
+    )
+    decision_matrix = decision_matrix_frame(report, lc214_simulation)
+    legal_timeline = legal_timeline_frame()
+    official_sources = official_sources_frame()
+    st.info(
+        "Leitura sugerida: 1) confira a base importada; 2) compare 2026 com 2027 na mesma base; "
+        "3) avalie os créditos estimados das compras; 4) valide os pontos de atenção antes da decisão."
+    )
+    with st.expander("Como ler este dashboard e o que entra em cada cálculo", expanded=True):
+        st.markdown(
+            "**Valores importados** vêm dos relatórios Domínio/PGDAS. "
+            "**Valores calculados** aplicam essas bases às alíquotas dos cenários. "
+            "**Premissas** são estimativas ajustáveis e precisam ser confirmadas."
+        )
+        st.dataframe(explanations, hide_index=True, width="stretch")
+
+    st.subheader("1. Diagnóstico executivo Nascel")
+    diagnostic_columns = st.columns([1, 2, 3])
+    diagnostic_columns[0].metric(
+        "Índice de confiança dos dados",
+        f"{diagnostic.score}/100",
+        help="Pontuação gerencial baseada em histórico, PGDAS, conciliação, clientes e fornecedores. Não mede risco jurídico.",
+    )
+    diagnostic_columns[1].metric(
+        "Situação para decisão",
+        diagnostic.status,
+        help="Indica se os dados permitem avançar para uma decisão assistida ou se ainda há premissas a revisar.",
+    )
+    diagnostic_columns[2].metric(
+        "Direção inicial do estudo",
+        "Fora do DAS" if "fora" in diagnostic.recommendation.lower() else "Dentro do DAS" if "dentro" in diagnostic.recommendation.lower() else "Aguardar validações",
+        help="Direção preliminar, nunca uma escolha automática. A opção depende do impacto líquido e das validações listadas.",
+    )
+    st.markdown(
+        f'<div class="recommendation"><h3>Leitura consultiva</h3><p><strong>{diagnostic.recommendation}</strong> '
+        f'{diagnostic.rationale}</p></div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander("Checklist que forma o índice de confiança"):
+        st.dataframe(diagnostic.checklist, hide_index=True, width="stretch")
+
+    st.subheader("2. Base analisada e resultado consolidado")
+    base_metrics = st.columns(3)
+    base_metrics[0].metric(
+        "Saídas analisadas", brl(report.base_saidas),
+        help="Receita da competência usada como base para medir a carga tributária. Não representa lucro ou caixa.",
+    )
+    base_metrics[1].metric(
+        "Base de entradas", brl(report.base_entradas_credito),
+        help="Aquisições consideradas potencialmente aptas a gerar crédito. Exige validação fiscal por documento.",
+    )
+    base_metrics[2].metric(
+        "Compras potencialmente creditáveis", pct(purchase_creditable_ratio),
+        help="Base de crédito das entradas dividida pelas compras da mesma competência. Exige validação por documento e item.",
+    )
+    impact_metrics = st.columns(2)
+    impact_metrics[0].metric(
         "Impacto Híbrido 2027", brl(report.fase_2027["diferenca"]),
         delta=pct(report.fase_2027["diferenca_percentual"]), delta_color="inverse",
+        help="Diferença entre o total híbrido de 2027 e a carga atual, segundo o relatório Domínio.",
     )
-    metrics[4].metric(
+    impact_metrics[1].metric(
         "Impacto Híbrido 2033", brl(report.fase_2033["diferenca"]),
         delta=pct(report.fase_2033["diferenca_percentual"]), delta_color="inverse",
+        help="Diferença estrutural estimada para 2033. Depende das alíquotas e regras futuras informadas no arquivo.",
     )
 
-    scenarios = scenario_table(report)
+    st.subheader("3. Comparação dos cenários")
+    scenarios = scenario_table(report, lc214_simulation)
     chart_columns = st.columns(2)
     with chart_columns[0]:
         figure = go.Figure(go.Bar(
             x=scenarios["Cenário"], y=scenarios["Carga Tributária"],
-            marker_color=["#526579", "#2F80ED", "#16A085", "#F2C94C"],
+            marker_color=[NASCEL_COLORS["slate"], NASCEL_COLORS["navy"], NASCEL_COLORS["gold"], NASCEL_COLORS["green"]],
             text=[brl(value) for value in scenarios["Carga Tributária"]], textposition="outside",
         ))
         figure.update_layout(title="Carga tributária por cenário", yaxis_title="R$", height=430, margin=dict(l=20, r=20, t=60, b=90))
         st.plotly_chart(figure, width="stretch")
+        st.caption("Compara quanto a empresa desembolsaria em tributos em cada cenário para a mesma base de saídas.")
     with chart_columns[1]:
         figure = go.Figure(go.Bar(
-            x=scenarios["Cenário"], y=scenarios["Crédito Potencial ao Cliente"],
-            marker_color="#7B61FF",
-            text=[brl(value) for value in scenarios["Crédito Potencial ao Cliente"]], textposition="outside",
+            x=scenarios["Cenário"], y=scenarios["Crédito Estimado das Compras"],
+            marker_color=NASCEL_COLORS["gold"],
+            text=[brl(value) for value in scenarios["Crédito Estimado das Compras"]], textposition="outside",
         ))
-        figure.update_layout(title="Crédito potencial em operações creditáveis", yaxis_title="R$", height=430, margin=dict(l=20, r=20, t=60, b=90))
+        figure.update_layout(title="Crédito estimado sobre as compras", yaxis_title="R$", height=430, margin=dict(l=20, r=20, t=60, b=90))
         st.plotly_chart(figure, width="stretch")
+        st.caption(
+            "Estimativa do crédito de CBS/IBS que a própria empresa poderá tomar "
+            "sobre a base atual de compras creditáveis. No Por Dentro, esse valor é zero."
+        )
 
     scenarios_display = scenarios.copy()
     scenarios_display["Carga Efetiva"] = scenarios_display["Carga Efetiva"] * 100
@@ -712,50 +832,172 @@ def render_dominio_results(
         column_config={
             "Carga Tributária": st.column_config.NumberColumn(format="R$ %.2f"),
             "Carga Efetiva": st.column_config.NumberColumn(format="%.2f%%"),
-            "Crédito Potencial ao Cliente": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Crédito Estimado das Compras": st.column_config.NumberColumn(format="R$ %.2f"),
             "Variação vs. Atual": st.column_config.NumberColumn(format="R$ %.2f"),
         },
     )
 
-    st.subheader("Projeção dos períodos futuros")
-    totals = projection.totais
-    projection_metrics = st.columns(4)
-    projection_metrics[0].metric(
-        f"Receita projetada · {projection.horizonte_meses} meses", brl(totals["receita"])
-    )
-    projection_metrics[1].metric("Por Dentro projetado", brl(totals["por_dentro"]))
-    projection_metrics[2].metric(
-        "Híbrido 2027 projetado",
-        brl(totals["hibrido_2027"]),
-        delta=brl(totals["hibrido_2027"] - totals["por_dentro"]),
+    st.subheader("4. Decisão tributária 2027/2028 — dentro ou fora do DAS")
+    current_total = report.tributos_atuais["Total"]
+    current_rate = current_total / report.base_saidas if report.base_saidas else 0.0
+    hybrid_2027_total = report.fase_2027["total"]
+    lc_metrics = st.columns(4)
+    lc_metrics[0].metric("Anexo / faixa", f"{lc214_simulation.annex} / {lc214_simulation.bracket}ª")
+    lc_metrics[1].metric("Alíquota efetiva 2026 e 2027", pct(current_rate))
+    lc_metrics[2].metric("2027 Por Dentro · DAS", brl(current_total), delta="R$ 0,00 vs. 2026")
+    lc_metrics[3].metric(
+        "2027 Híbrido · DAS + CBS/IBS",
+        brl(hybrid_2027_total),
+        delta=brl(hybrid_2027_total - current_total),
         delta_color="inverse",
     )
-    projection_metrics[3].metric(
-        "Híbrido 2033 projetado",
-        brl(totals["hibrido_2033"]),
-        delta=brl(totals["hibrido_2033"] - totals["por_dentro"]),
-        delta_color="inverse",
+    st.success(
+        "2026 e 2027 Por Dentro: mesma alíquota efetiva e mesmo DAS quando receita, Anexo e segregações "
+        "permanecem iguais. Em 2027 muda a repartição interna da guia, não a carga total desta comparação."
     )
-    projection_chart = go.Figure()
-    for column, color in (
-        ("Por Dentro", "#2F80ED"),
-        ("Híbrido 2027", "#16A085"),
-        ("Híbrido 2033", "#F2C94C"),
-    ):
-        projection_chart.add_scatter(
-            x=projection.projecao_mensal["Competência"],
-            y=projection.projecao_mensal[column],
-            name=column,
-            mode="lines+markers",
-            line=dict(color=color),
+    st.dataframe(
+        lc214_comparison,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Atual (PGDAS/Domínio)": st.column_config.NumberColumn(format="R$ %.2f"),
+            "2027/2028 Por Dentro (DAS)": st.column_config.NumberColumn(format="R$ %.2f"),
+            "2027 Por Fora (DAS + regular)": st.column_config.NumberColumn(format="R$ %.2f"),
+        },
+    )
+    st.caption(
+        "Por Dentro: CBS e IBS permanecem na guia do Simples, sem diferença de carga vs. 2026 nesta mesma base. "
+        "Por Fora: o DAS fica residual e CBS/IBS são recolhidos pelo regime regular. No Anexo II, o IPI permanece "
+        "na partilha oficial de 2027/2028; o sistema não zera o IPI nem troca o Anexo automaticamente."
+    )
+    st.markdown("#### Matriz de decisão Nascel")
+    st.dataframe(
+        decision_matrix,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Crédito estimado das compras": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Desembolso estimado": st.column_config.NumberColumn(format="R$ %.2f"),
+        },
+    )
+    with st.expander("Cronograma legal e ações de preparação"):
+        st.dataframe(legal_timeline, hide_index=True, width="stretch")
+        st.caption(
+            "A LC 214/2025 recebeu alterações posteriores, inclusive pela LC 227/2026. "
+            "Prazos e regulamentações devem ser confirmados antes de cada opção semestral."
         )
+        st.markdown("**Fontes oficiais para conferência**")
+        for source in official_sources.itertuples(index=False):
+            st.markdown(f"- [{source.Documento}]({source.URL}) — {source.Escopo}")
+
+    st.subheader("5. Projeção anual simplificada — 2027 e 2033")
+    st.caption(
+        f"2027 considera janeiro a dezembro, a média dos últimos {projection.meses_media} meses "
+        f"e crescimento {'calculado pelo histórico' if projection.modo_crescimento == 'average' else 'informado pelo usuário'} "
+        f"de {pct(projection.crescimento_anual)} ao ano. Para facilitar a comparação, 2033 usa "
+        "a mesma receita, a mesma base de compras e a mesma alíquota efetiva do DAS Normal "
+        "projetadas para 2027; mudam apenas as premissas tributárias do Híbrido."
+    )
+    totals = projection.totais
+    annual = projection.resumo_anual
+    annual_metrics = st.columns(4)
+    annual_metrics[0].metric("Receita anual projetada", brl(totals["receita"]))
+    annual_metrics[1].metric("Compras anuais projetadas", brl(totals["entradas"]))
+    annual_metrics[2].metric(
+        "Base creditável das compras",
+        brl(float(annual.iloc[0]["Base Creditável das Compras"])),
+        help="Mantém a proporção conciliada entre a base de crédito do Domínio e as entradas da mesma competência.",
+    )
+    annual_metrics[3].metric(
+        "Compras potencialmente creditáveis",
+        pct(projection.percentual_entradas_creditaveis),
+    )
+
+    year_2027 = annual.iloc[0]
+    year_2033 = annual.iloc[1]
+    scenario_metrics = st.columns(4)
+    scenario_metrics[0].metric(
+        f"2027 · DAS Normal · {pct(float(year_2027['DAS Normal · Alíquota Efetiva']))}",
+        brl(float(year_2027["DAS Normal · Valor"])),
+    )
+    scenario_metrics[1].metric(
+        f"2027 · Híbrido · {pct(float(year_2027['Híbrido · Alíquota Efetiva']))}",
+        brl(float(year_2027["Híbrido · Total a Pagar"])),
+        delta=brl(float(year_2027["Diferença vs. DAS Normal"])),
+        delta_color="inverse",
+    )
+    scenario_metrics[2].metric(
+        f"2033 · DAS Normal · {pct(float(year_2033['DAS Normal · Alíquota Efetiva']))}",
+        brl(float(year_2033["DAS Normal · Valor"])),
+    )
+    scenario_metrics[3].metric(
+        f"2033 · Híbrido · {pct(float(year_2033['Híbrido · Alíquota Efetiva']))}",
+        brl(float(year_2033["Híbrido · Total a Pagar"])),
+        delta=brl(float(year_2033["Diferença vs. DAS Normal"])),
+        delta_color="inverse",
+    )
+
+    projection_chart = go.Figure()
+    projection_chart.add_bar(
+        x=annual["Período"],
+        y=annual["DAS Normal · Valor"],
+        name="DAS Normal",
+        marker_color=NASCEL_COLORS["navy"],
+        text=[
+            f"{brl(value)} · {pct(rate)}"
+            for value, rate in zip(
+                annual["DAS Normal · Valor"],
+                annual["DAS Normal · Alíquota Efetiva"],
+            )
+        ],
+        textposition="outside",
+    )
+    projection_chart.add_bar(
+        x=annual["Período"],
+        y=annual["Híbrido · Total a Pagar"],
+        name="Híbrido",
+        marker_color=NASCEL_COLORS["gold"],
+        text=[
+            f"{brl(value)} · {pct(rate)}"
+            for value, rate in zip(
+                annual["Híbrido · Total a Pagar"],
+                annual["Híbrido · Alíquota Efetiva"],
+            )
+        ],
+        textposition="outside",
+    )
     projection_chart.update_layout(
-        yaxis_title="Carga tributária estimada (R$)",
-        height=410,
-        margin=dict(l=20, r=20, t=30, b=20),
+        barmode="group",
+        yaxis_title="Total anual estimado (R$)",
+        height=430,
+        margin=dict(l=20, r=20, t=40, b=20),
     )
     st.plotly_chart(projection_chart, width="stretch")
-    with st.expander("Ver memória da projeção e períodos importados"):
+    st.caption(
+        "No DAS Normal, CBS e IBS permanecem na guia e não geram crédito das compras para a empresa. "
+        "No Híbrido, o quadro mostra DAS residual, CBS e IBS após o abatimento do crédito estimado das compras."
+    )
+    annual_display = annual.copy()
+    for rate_column in (
+        "DAS Normal · Alíquota Efetiva",
+        "Híbrido · Alíquota Efetiva",
+    ):
+        annual_display[rate_column] = annual_display[rate_column] * 100
+    st.dataframe(
+        annual_display,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "DAS Normal · Alíquota Efetiva": st.column_config.NumberColumn(format="%.2f%%"),
+            "Híbrido · Alíquota Efetiva": st.column_config.NumberColumn(format="%.2f%%"),
+            **{
+                column: st.column_config.NumberColumn(format="R$ %.2f")
+                for column in annual.columns
+                if column != "Período" and "Alíquota" not in column
+            },
+        },
+    )
+    with st.expander("Ver períodos importados e premissas da projeção"):
         st.caption(
             f"Média dos últimos {projection.meses_media} meses · crescimento anual aplicado "
             f"{pct(projection.crescimento_anual)} "
@@ -763,9 +1005,11 @@ def render_dominio_results(
             f"{len(reports)} competência(s) de simulação consolidada(s)."
         )
         st.dataframe(projection.historico_simulacoes, hide_index=True, width="stretch")
-        st.dataframe(projection.projecao_mensal, hide_index=True, width="stretch")
 
-    st.subheader("Evolução e conciliação")
+    st.subheader("6. Evolução e conciliação")
+    st.caption(
+        "Entradas e saídas vêm do Demonstrativo Mensal. A conciliação compara as entradas contábeis com a base efetivamente usada na simulação de créditos."
+    )
     monthly_chart = go.Figure()
     monthly_chart.add_scatter(x=monthly.movimentos["Competência"], y=monthly.movimentos["Saídas"], name="Saídas", mode="lines+markers")
     monthly_chart.add_scatter(x=monthly.movimentos["Competência"], y=monthly.movimentos["Entradas"], name="Entradas", mode="lines+markers")
@@ -777,7 +1021,7 @@ def render_dominio_results(
             f"simulação usa {brl(report.base_entradas_credito)}. Diferença para conciliar: {brl(reconciliation)}."
         )
 
-    st.subheader("Pontos de atenção e plano de ação")
+    st.subheader("7. Pontos de atenção e plano de ação")
     points = pd.DataFrame(attention_points(report, monthly, pgdas_report))
     st.dataframe(points, hide_index=True, width="stretch")
     st.markdown(
@@ -789,7 +1033,7 @@ def render_dominio_results(
         unsafe_allow_html=True,
     )
 
-    st.subheader("Relatório inteligente de possibilidades")
+    st.subheader("8. Relatório Consultivo Nascel")
     report_state_key = (
         f"ai_report_{report.cnpj}_{report.periodo:%Y%m}_{projection.horizonte_meses}_"
         f"{projection.meses_media}_{projection.modo_crescimento}_{projection.crescimento_anual:.4f}"
@@ -801,26 +1045,48 @@ def render_dominio_results(
             "O relatório acima é produzido localmente. A opção abaixo envia o relatório-base para a API "
             "configurada somente quando você clicar em gerar. Não envie dados sem autorização do cliente."
         )
-        api_key = get_streamlit_secret("GEMINI_API_KEY")
+        api_key, api_key_source = get_gemini_api_key()
         configured_model = get_streamlit_secret("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
-        model_options = [
-            "gemini-3.5-flash",
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-        ]
-        if configured_model not in model_options:
+        models_state_key = f"gemini_models_{report.cnpj}"
+        verified_models = st.session_state.get(models_state_key, [])
+        if api_key:
+            st.success(f"Credencial carregada por {api_key_source}; o valor da chave permanece oculto.")
+            st.warning(
+                "Desde 19/06/2026, chaves padrão irrestritas podem ser recusadas pelo Google. "
+                "Se o teste falhar por permissão, gere uma chave de autorização no Google AI Studio."
+            )
+        else:
+            st.info(
+                "Configure GOOGLE_API_KEY (preferencial) ou GEMINI_API_KEY em .streamlit/secrets.toml "
+                "ou nos Secrets do Streamlit Cloud."
+            )
+        if st.button(
+            "Testar conexão e atualizar modelos",
+            disabled=not api_key,
+            help="Valida a credencial e lista modelos compatíveis sem enviar os dados do relatório.",
+        ):
+            try:
+                with st.spinner("Validando credencial e consultando modelos disponíveis..."):
+                    verified_models = list_gemini_models(api_key)
+                    st.session_state[models_state_key] = verified_models
+                st.success(f"Conexão validada. {len(verified_models)} modelo(s) de texto disponível(is).")
+            except AnalyticsError as exc:
+                st.session_state.pop(models_state_key, None)
+                verified_models = []
+                st.error(str(exc))
+
+        model_options = list(verified_models or GEMINI_MODEL_PREFERENCE)
+        if not verified_models and configured_model not in model_options:
             model_options.insert(0, configured_model)
+        selected_default = configured_model if configured_model in model_options else model_options[0]
         model = st.selectbox(
             "Modelo Gemini",
             model_options,
-            index=model_options.index(configured_model),
-            help="gemini-3.5-flash é o padrão estável recomendado para este relatório; 2.5 Pro prioriza raciocínio complexo.",
+            index=model_options.index(selected_default),
+            help="Após testar a conexão, esta lista mostra somente modelos liberados para a credencial configurada.",
         )
-        if api_key:
-            st.success("GEMINI_API_KEY carregada pelos secrets do Streamlit.")
-        else:
-            st.info("Configure GEMINI_API_KEY em .streamlit/secrets.toml ou nos Secrets do Streamlit Cloud.")
+        if verified_models:
+            st.caption("Lista confirmada diretamente pela API para esta credencial.")
         if st.button("Gerar relatório com Gemini", type="secondary", disabled=not api_key):
             try:
                 with st.spinner("Analisando cenários e recomendações..."):
@@ -830,6 +1096,7 @@ def render_dominio_results(
                 st.rerun()
             except AnalyticsError as exc:
                 st.error(str(exc))
+                st.info("O relatório analítico local permanece disponível e nenhum cálculo foi perdido.")
         if report_state_key in st.session_state and st.button("Restaurar relatório local"):
             del st.session_state[report_state_key]
             st.rerun()
@@ -860,7 +1127,9 @@ def render_dominio_results(
         else:
             st.info("Nenhum extrato PGDAS-D foi importado.")
     with detail_tabs[3]:
-        images = create_dashboard_images(report, monthly, pgdas_report, projection)
+        images = create_dashboard_images(
+            report, monthly, pgdas_report, projection, lc214_simulation
+        )
         for name, content in images.items():
             st.image(content, caption=name, width="stretch")
             st.download_button(f"Baixar {name}", content, file_name=name, mime="image/png", key=f"download_{name}")
@@ -872,6 +1141,8 @@ def render_dominio_results(
         projection=projection,
         intelligent_report=active_report,
         reports=reports,
+        lc214_comparison=lc214_comparison,
+        lc214_simulation=lc214_simulation,
     )
     st.download_button(
         "Baixar dashboard executivo em Excel",
@@ -922,11 +1193,84 @@ def render_dominio_import() -> None:
         pgdas_content = pgdas_file.getvalue() if pgdas_file else None
 
     try:
-        reports = [parse_dominio_simulation(content) for content in simulation_contents]
+        reports = [
+            item
+            for content in simulation_contents
+            for item in parse_dominio_simulations(content)
+        ]
         report = max(reports, key=lambda item: item.periodo)
         monthly = parse_dominio_monthly(monthly_content)
         pgdas_report = parse_pgdas(pgdas_content) if pgdas_content else None
     except (DominioImportError, ValueError) as exc:
+        st.error(str(exc))
+        return
+
+    compatible_pgdas = bool(pgdas_report and cnpjs_are_compatible(report.cnpj, pgdas_report))
+    if compatible_pgdas and pgdas_report.anexo in {"I", "II", "III", "IV", "V"}:
+        inferred_annex = pgdas_report.anexo
+    elif report.tributos_atuais.get("IPI", 0.0) > 0:
+        inferred_annex = "II"
+    elif report.tributos_atuais.get("ICMS", 0.0) > 0:
+        inferred_annex = "I"
+    elif report.tributos_atuais.get("ISS", 0.0) > 0 and report.tributos_atuais.get("INSS/CPP", 0.0) == 0:
+        inferred_annex = "IV"
+    else:
+        inferred_annex = "III"
+    historical_until_period = monthly.movimentos[
+        monthly.movimentos["Competência"].dt.to_period("M") <= report.periodo.to_period("M")
+    ].tail(12)
+    historical_rbt12 = float(
+        (historical_until_period["Saídas"] + historical_until_period["Serviços"]).sum()
+    )
+    inferred_rbt12 = pgdas_report.rbt12 if compatible_pgdas else historical_rbt12
+
+    st.subheader("Premissas legais do Simples 2027/2028")
+    legal_columns = st.columns(2)
+    with legal_columns[0]:
+        future_annex = st.selectbox(
+            "Anexo da LC 214/2025",
+            ["I", "II", "III", "IV", "V"],
+            index=["I", "II", "III", "IV", "V"].index(inferred_annex),
+            help="Preenchido pelo PGDAS quando compatível; sem PGDAS, é apenas uma inferência e deve ser validado.",
+        )
+    with legal_columns[1]:
+        future_rbt12 = st.number_input(
+            "RBT12 para a nova tabela",
+            min_value=0.01,
+            max_value=4_800_000.00,
+            value=min(max(inferred_rbt12, 0.01), 4_800_000.00),
+            step=1_000.0,
+            format="%.2f",
+            help="Usa o RBT12 do PGDAS compatível; na ausência dele, soma as últimas 12 competências do Demonstrativo Mensal.",
+        )
+    if not compatible_pgdas:
+        st.warning(
+            "O Anexo e o RBT12 não vieram de um PGDAS compatível. Revise essas duas premissas antes da decisão."
+        )
+    if future_annex == "II":
+        st.info(
+            "Anexo II · critério conservador: a tabela oficial de 2027/2028 ainda inclui o IPI na partilha. "
+            "Embora exista a redução geral do IPI prevista na transição, não foi identificada regra oficial "
+            "que autorize retirar o IPI desta tabela ou trocar automaticamente o Anexo. O cálculo manterá o IPI "
+            "até eventual norma específica."
+        )
+    try:
+        lc214_simulation = simulate_lc214_2027_2028(
+            revenue=report.base_saidas,
+            rbt12=future_rbt12,
+            annex=future_annex,
+            regular_cbs=report.fase_2027["cbs"],
+            regular_ibs=report.fase_2027["ibs"],
+        )
+        current_taxes = dict(pgdas_report.tributos) if compatible_pgdas else dict(report.tributos_atuais)
+        current_taxes["Total"] = report.tributos_atuais["Total"]
+        lc214_comparison = tax_comparison_frame(
+            current_taxes,
+            lc214_simulation,
+            inside_total_override=report.tributos_atuais["Total"],
+            outside_residual_total_override=report.fase_2027["simples_residual"],
+        )
+    except SimplesLC214Error as exc:
         st.error(str(exc))
         return
 
@@ -937,7 +1281,7 @@ def render_dominio_import() -> None:
         horizontal=True,
         help="No modo automático, o sistema calcula a média geométrica das variações mensais, reduzindo a distorção de meses muito voláteis.",
     )
-    projection_columns = st.columns(3)
+    projection_columns = st.columns(2)
     available_windows = [value for value in (3, 6, 12, 18, 24) if value <= len(monthly.movimentos)]
     if not available_windows:
         available_windows = [len(monthly.movimentos)]
@@ -948,9 +1292,8 @@ def render_dominio_import() -> None:
             available_windows,
             index=available_windows.index(default_window),
         )
+    horizon_months = 12
     with projection_columns[1]:
-        horizon_months = st.slider("Horizonte projetado (meses)", 6, 36, 12, 1)
-    with projection_columns[2]:
         if growth_mode_label.startswith("Automático"):
             growth_options = [
                 value
@@ -975,6 +1318,10 @@ def render_dominio_import() -> None:
             )
             growth_lookback_months = 6
             growth_mode = "fixed"
+    st.caption(
+        "Períodos fixos: ano-calendário de 2027 e cenário estrutural de 2033 "
+        "com a mesma base anual de receita e compras de 2027."
+    )
     try:
         projection = build_future_projection(
             reports,
@@ -984,6 +1331,7 @@ def render_dominio_import() -> None:
             annual_growth=annual_growth_pct / 100,
             growth_mode=growth_mode,
             growth_lookback_months=growth_lookback_months,
+            lc214_simulation=lc214_simulation,
         )
         intelligent_report = generate_local_intelligent_report(
             projection, reports, monthly, pgdas_report
@@ -992,15 +1340,21 @@ def render_dominio_import() -> None:
         st.error(str(exc))
         return
     render_dominio_results(
-        report, monthly, pgdas_report, reports, projection, intelligent_report
+        report, monthly, pgdas_report, reports, projection, intelligent_report,
+        lc214_simulation, lc214_comparison,
     )
 
 
 def main() -> None:
     st.set_page_config(page_title="Simulador IBS/CBS | Simples Nacional", page_icon="📊", layout="wide")
     inject_styles()
-    st.title("Portal de Simulação da Reforma Tributária")
-    st.markdown('<p class="subtitle">Simples Nacional · Comparativo Por Dentro × Híbrido</p>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="nascel-brand"><img src="{NASCEL_LOGO_URL}" alt="Grupo Nascel">'
+        f'<div class="nascel-brand-copy"><strong>Nascel Contabilidade</strong>{NASCEL_TAGLINE}</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.title("Diagnóstico da Reforma Tributária")
+    st.markdown('<p class="subtitle">Simples Nacional · Análise consultiva Por Dentro × Fora do DAS</p>', unsafe_allow_html=True)
 
     import_mode = st.radio(
         "Formato dos arquivos",
