@@ -19,6 +19,8 @@ from dashboard_exports import (
     dashboard_explanations,
 )
 from dominio_importers import (
+    MonthlyReport,
+    _parse_dominio_simulation_frames,
     _simulation_sheet_pairs,
     cnpjs_are_compatible,
     parse_dominio_monthly,
@@ -36,6 +38,107 @@ from nascel_consulting import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTS = ROOT / "documentos"
+
+
+class ServiceCompanyWithoutInputsTests(unittest.TestCase):
+    @staticmethod
+    def simulation_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+        summary = pd.DataFrame(None, index=range(20), columns=range(75), dtype=object)
+        summary.iat[0, 0] = "CD SERVIÇOS LTDA"
+        summary.iat[1, 4] = "12.345.678/0001-95"
+        summary.iat[2, 4] = pd.Timestamp("2026-01-01")
+
+        summary.iat[4, 0] = "2027 - 1ª fase"
+        summary.iat[10, 0] = "2033 - fase final"
+        for row, total, difference in ((5, 92.0, 12.0), (11, 95.0, 15.0)):
+            summary.iat[row, 38] = 80.0
+            summary.iat[row, 41] = 20.0
+            summary.iat[row, 48] = 45.0
+            summary.iat[row, 52] = total - 65.0
+            summary.iat[row, 58] = total
+            summary.iat[row, 68] = difference
+            summary.iat[row, 74] = difference / 10
+        summary.iat[11, 1] = 5.0
+        summary.iat[11, 6] = 5.0
+        summary.iat[11, 10] = 20.0
+        summary.iat[11, 12] = 0.0
+        summary.iat[11, 20] = 0.0
+        summary.iat[11, 24] = 30.0
+        summary.iat[11, 30] = 5.0
+        summary.iat[11, 34] = 15.0
+        summary.iat[15, 0] = "Débitos pelas Saídas"
+        summary.iat[15, 8] = 1_000.0
+        summary.iat[15, 14] = 8.8
+        summary.iat[15, 22] = 0.0
+        summary.iat[15, 50] = 8.8
+        summary.iat[15, 60] = 17.7
+
+        detail = pd.DataFrame(None, index=range(14), columns=range(17), dtype=object)
+        detail.iat[6, 1] = "Serviços tributados"
+        detail.iat[6, 13] = 1_000.0
+        detail.iat[7, 0] = "Clientes"
+        detail.iat[8, 1] = "Regime regular"
+        detail.iat[8, 13] = 1_000.0
+        detail.iat[13, 0] = "Total"
+        return summary, detail
+
+    def test_simulation_accepts_omitted_input_sections(self) -> None:
+        summary, detail = self.simulation_frames()
+        report = _parse_dominio_simulation_frames(summary, detail)
+
+        self.assertEqual(report.base_entradas_credito, 0.0)
+        self.assertTrue(report.entradas_por_acumulador.empty)
+        self.assertTrue(report.fornecedores_por_regime.empty)
+        self.assertEqual(
+            report.entradas_por_acumulador.columns.tolist(),
+            ["Descrição", "Valor", "Percentual"],
+        )
+        self.assertEqual(report.aliquota_credito_cbs_2027, 0.0)
+        self.assertEqual(report.aliquota_credito_ibs_2033, 0.0)
+
+    def test_monthly_report_accepts_missing_input_column(self) -> None:
+        frame = pd.DataFrame(None, index=range(12), columns=range(25), dtype=object)
+        frame.iat[0, 4] = "CD SERVIÇOS LTDA"
+        frame.iat[3, 4] = "12.345.678/0001-95"
+        frame.iat[5, 4] = pd.Timestamp("2026-01-01")
+        frame.iat[5, 13] = pd.Timestamp("2026-01-31")
+        frame.iat[9, 0] = "Mês"
+        frame.iat[9, 6] = "Ano"
+        frame.iat[9, 15] = "Saídas R$"
+        frame.iat[9, 22] = "Serviços R$"
+        frame.iat[10, 0] = "Janeiro"
+        frame.iat[10, 5] = 2026
+        frame.iat[10, 15] = 0.0
+        frame.iat[10, 22] = 1_000.0
+        frame.iat[11, 0] = "Totais"
+        workbook = MagicMock(sheet_names=["Demonstrativo"])
+
+        with patch("dominio_importers._open_legacy_workbook", return_value=workbook), patch(
+            "dominio_importers._read_sheet", return_value=frame
+        ):
+            monthly = parse_dominio_monthly(b"service-company")
+
+        self.assertEqual(monthly.movimentos.iloc[0]["Entradas"], 0.0)
+        self.assertEqual(monthly.movimentos.iloc[0]["Serviços"], 1_000.0)
+
+    def test_projection_keeps_input_credits_at_zero(self) -> None:
+        summary, detail = self.simulation_frames()
+        report = _parse_dominio_simulation_frames(summary, detail)
+        monthly = MonthlyReport(
+            empresa=report.empresa,
+            cnpj=report.cnpj,
+            periodo_inicial=pd.Timestamp("2026-01-01"),
+            periodo_final=pd.Timestamp("2026-01-31"),
+            movimentos=pd.DataFrame(
+                [{"Competência": report.periodo, "Entradas": 0.0, "Saídas": 0.0, "Serviços": 1_000.0}]
+            ),
+        )
+
+        projection = build_future_projection([report], monthly)
+
+        self.assertEqual(projection.media_entradas, 0.0)
+        self.assertEqual(projection.percentual_entradas_creditaveis, 0.0)
+        self.assertEqual(projection.totais["credito_compras_2027"], 0.0)
 
 
 class DominioImporterTests(unittest.TestCase):
@@ -120,6 +223,22 @@ class DominioImporterTests(unittest.TestCase):
             reports=[self.report],
             lc214_comparison=lc214_comparison,
             lc214_simulation=lc214,
+            activity_candidates=pd.DataFrame(
+                [
+                    {
+                        "CNAE": "6201-5/01",
+                        "Atividade": "Desenvolvimento de software",
+                        "Item LC 116": "1.01",
+                        "NBS": "1.1502.20.00",
+                        "Descrição NBS": "Serviço candidato",
+                        "cClassTrib": "000001",
+                        "Classificação tributária": "Tributação integral",
+                        "Redução IBS (%)": 0.0,
+                        "Redução CBS (%)": 0.0,
+                        "Local de incidência IBS": "Domicílio do adquirente",
+                    }
+                ]
+            ),
         )
         self.assertEqual(excel[:2], b"PK")
         self.assertGreater(len(excel), 50_000)
@@ -130,6 +249,7 @@ class DominioImporterTests(unittest.TestCase):
         self.assertIn("Decisao_Tributaria", workbook.sheet_names)
         self.assertIn("Cronograma_Legal", workbook.sheet_names)
         self.assertIn("Fontes_Oficiais", workbook.sheet_names)
+        self.assertIn("Atividades_CNPJ", workbook.sheet_names)
         sensitivity = pd.read_excel(
             BytesIO(excel), sheet_name="Sensibilidade", header=None, engine="calamine"
         )

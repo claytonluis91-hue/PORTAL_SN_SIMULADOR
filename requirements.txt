@@ -8,3 +8,4 @@ python-calamine>=0.5,<1
 pymupdf>=1.26,<2
 reportlab>=4.2,<5
 google-genai>=1.75,<3
+requests>=2.32,<3

@@ -146,6 +146,16 @@ def _find_row(frame: pd.DataFrame, *terms: str, start: int = 0) -> int:
     raise DominioImportError(f"Trecho obrigatório não encontrado no relatório: {' / '.join(terms)}.")
 
 
+def _find_row_optional(frame: pd.DataFrame, *terms: str, start: int = 0) -> int | None:
+    """Localiza uma seção que o Domínio pode omitir quando não há movimento."""
+    normalized_terms = [normalize_text(term) for term in terms]
+    for index in range(start, len(frame)):
+        text = _row_text(frame, index)
+        if all(term in text for term in normalized_terms):
+            return index
+    return None
+
+
 def _find_phase_values(frame: pd.DataFrame, year: int) -> tuple[int, dict[str, float]]:
     phase_row = _find_row(frame, str(year), "fase")
     for index in range(phase_row + 1, min(phase_row + 7, len(frame))):
@@ -182,7 +192,9 @@ def _extract_section_rows(
         if frame.shape[1] > 16 and pd.notna(frame.iat[index, 16]):
             record["Percentual"] = parse_br_number(frame.iat[index, 16]) / 100
         records.append(record)
-    return pd.DataFrame(records)
+    if records:
+        return pd.DataFrame(records)
+    return pd.DataFrame(columns=["Descrição", "Valor", "Percentual"])
 
 
 def _parse_dominio_simulation_frames(
@@ -209,18 +221,29 @@ def _parse_dominio_simulation_frames(
     }
 
     debit_row = _find_row(summary, "debitos", "saidas", start=current_row)
-    credit_row = _find_row(summary, "creditos", "entradas", start=debit_row)
+    # Empresas exclusivamente prestadoras podem não ter entradas na competência.
+    # Nessa situação, o Domínio omite tanto a linha de créditos quanto a seção
+    # detalhada de entradas; a ausência representa movimento zero, não layout inválido.
+    credit_row = _find_row_optional(summary, "creditos", "entradas", start=debit_row)
     base_saidas = parse_br_number(summary.iat[debit_row, 8])
-    base_entradas = parse_br_number(summary.iat[credit_row, 8])
+    base_entradas = parse_br_number(summary.iat[credit_row, 8]) if credit_row is not None else 0.0
 
-    entradas_row = _find_row(detail, "entradas")
-    clientes_row = _find_row(detail, "clientes", start=entradas_row)
-    fornecedores_row = _find_row(detail, "fornecedores", start=clientes_row)
+    entradas_row = _find_row_optional(detail, "entradas")
+    clientes_row = _find_row(detail, "clientes", start=entradas_row or 5)
+    fornecedores_row = _find_row_optional(detail, "fornecedores", start=clientes_row)
     footer_row = len(detail) - 1
-    saidas = _extract_section_rows(detail, 5, entradas_row)
-    entradas = _extract_section_rows(detail, entradas_row, clientes_row)
-    clientes = _extract_section_rows(detail, clientes_row, fornecedores_row)
-    fornecedores = _extract_section_rows(detail, fornecedores_row, footer_row)
+    saidas = _extract_section_rows(detail, 5, entradas_row or clientes_row)
+    entradas = (
+        _extract_section_rows(detail, entradas_row, clientes_row)
+        if entradas_row is not None
+        else pd.DataFrame(columns=["Descrição", "Valor", "Percentual"])
+    )
+    clientes = _extract_section_rows(detail, clientes_row, fornecedores_row or footer_row)
+    fornecedores = (
+        _extract_section_rows(detail, fornecedores_row, footer_row)
+        if fornecedores_row is not None
+        else pd.DataFrame(columns=["Descrição", "Valor", "Percentual"])
+    )
 
     non_taxpayer_sales = float(
         saidas.loc[
@@ -242,10 +265,10 @@ def _parse_dominio_simulation_frames(
         aliquota_ibs_2027=parse_br_number(summary.iat[debit_row, 22]) / 100,
         aliquota_cbs_2033=parse_br_number(summary.iat[debit_row, 50]) / 100,
         aliquota_ibs_2033=parse_br_number(summary.iat[debit_row, 60]) / 100,
-        aliquota_credito_cbs_2027=parse_br_number(summary.iat[credit_row, 14]) / 100,
-        aliquota_credito_ibs_2027=parse_br_number(summary.iat[credit_row, 22]) / 100,
-        aliquota_credito_cbs_2033=parse_br_number(summary.iat[credit_row, 50]) / 100,
-        aliquota_credito_ibs_2033=parse_br_number(summary.iat[credit_row, 60]) / 100,
+        aliquota_credito_cbs_2027=parse_br_number(summary.iat[credit_row, 14]) / 100 if credit_row is not None else 0.0,
+        aliquota_credito_ibs_2027=parse_br_number(summary.iat[credit_row, 22]) / 100 if credit_row is not None else 0.0,
+        aliquota_credito_cbs_2033=parse_br_number(summary.iat[credit_row, 50]) / 100 if credit_row is not None else 0.0,
+        aliquota_credito_ibs_2033=parse_br_number(summary.iat[credit_row, 60]) / 100 if credit_row is not None else 0.0,
         saidas_por_acumulador=saidas,
         entradas_por_acumulador=entradas,
         clientes_por_regime=clientes,
@@ -316,7 +339,26 @@ def parse_dominio_monthly(content: bytes) -> MonthlyReport:
     workbook = _open_legacy_workbook(content)
     sheet = workbook.sheet_names[0]
     frame = _read_sheet(workbook, sheet)
-    header_row = _find_row(frame, "ano", "entradas", "saidas")
+    # O Demonstrativo Mensal de empresas sem compras pode omitir a coluna
+    # "Entradas R$". Saídas continua obrigatória e Serviços é opcional.
+    header_row = _find_row(frame, "ano", "saidas")
+    header_cells = [normalize_text(value) for value in frame.iloc[header_row]]
+
+    def monetary_column(term: str) -> int | None:
+        return next(
+            (
+                index
+                for index, value in enumerate(header_cells)
+                if term in value and "ufir" not in value and "acumulado" not in value
+            ),
+            None,
+        )
+
+    input_column = monetary_column("entradas")
+    output_column = monetary_column("saidas")
+    service_column = monetary_column("servicos")
+    if output_column is None:
+        raise DominioImportError("A coluna 'Saídas R$' não foi encontrada no Demonstrativo Mensal.")
     records: list[dict[str, object]] = []
     month_map = {
         "janeiro": 1, "fevereiro": 2, "marco": 3, "abril": 4, "maio": 5, "junho": 6,
@@ -333,15 +375,14 @@ def parse_dominio_monthly(content: bytes) -> MonthlyReport:
             float(value) for value in frame.iloc[index, 1:] if isinstance(value, (int, float)) and not pd.isna(value)
         ]
         year = next((int(value) for value in numeric_values if 2000 <= value <= 2100), None)
-        values_after_year = numeric_values[numeric_values.index(float(year)) + 1 :] if year else []
-        if year is None or len(values_after_year) < 3:
+        if year is None:
             continue
         records.append(
             {
                 "Competência": pd.Timestamp(year=year, month=month_number, day=1),
-                "Entradas": values_after_year[0],
-                "Saídas": values_after_year[1],
-                "Serviços": values_after_year[2],
+                "Entradas": parse_br_number(frame.iat[index, input_column]) if input_column is not None else 0.0,
+                "Saídas": parse_br_number(frame.iat[index, output_column]),
+                "Serviços": parse_br_number(frame.iat[index, service_column]) if service_column is not None else 0.0,
             }
         )
     movements = pd.DataFrame(records)

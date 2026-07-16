@@ -195,6 +195,8 @@ def build_future_projection(
         min(max(reported_credit_base / matched_input_total, 0.0), 1.0)
         if matched_input_total > 0
         else 1.0
+        if reported_credit_base > 0
+        else 0.0
     )
 
     last_period = monthly.movimentos["Competência"].max().to_period("M")
@@ -342,6 +344,8 @@ def generate_local_intelligent_report(
     delta_2027 = totals["hibrido_2027"] - totals["por_dentro"]
     delta_2033 = totals["hibrido_2033"] - totals["por_dentro"]
     input_coverage = projection.media_entradas / projection.media_saidas if projection.media_saidas else 0.0
+    has_inputs = projection.media_entradas > 0
+    has_creditable_inputs = any(report.base_entradas_credito > 0 for report in reports)
     trend_label = "crescimento" if projection.tendencia_recente > 0.03 else "queda" if projection.tendencia_recente < -0.03 else "estabilidade"
     preferred = (
         "Híbrido"
@@ -360,6 +364,22 @@ def generate_local_intelligent_report(
             if cnpjs_are_compatible(reports[-1].cnpj, pgdas)
             else "O PGDAS importado pertence a outro CNPJ e foi excluído das conclusões."
         )
+    input_summary = (
+        f"A base conciliada indica que {projection.percentual_entradas_creditaveis:.2%} das compras "
+        f"projetadas pode gerar crédito, e a cobertura média de entradas corresponde a "
+        f"{input_coverage:.2%} das vendas."
+        if has_creditable_inputs
+        else f"Há movimentação histórica média de entradas equivalente a {input_coverage:.2%} das vendas, "
+        "mas a simulação não reconheceu base creditável; por isso, os créditos de compras foram mantidos em zero."
+        if has_inputs
+        else "Não foram identificadas entradas no histórico nem base de crédito na simulação; "
+        "por isso, os créditos de compras foram mantidos em zero e esse fator não favorece o Híbrido."
+    )
+    hybrid_control = (
+        "Exige preparação documental, segregação do DAS residual e conciliação dos créditos."
+        if has_creditable_inputs
+        else "Exige segregação do DAS residual; confirme documentalmente a ausência ou inelegibilidade das entradas creditáveis."
+    )
 
     return f"""## Relatório Consultivo Nascel — possibilidades tributárias
 
@@ -381,7 +401,7 @@ A projeção cobre janeiro a dezembro de 2027, utiliza a média dos últimos {pr
 - Alíquota efetiva projetada: **{projection.aliquota_hibrida_2027:.2%}**.
 - Diferença contra o Por Dentro: **{money(delta_2027)}**.
 - Crédito estimado das compras: **{money(totals['credito_compras_2027'])}**.
-- Exige preparação documental, segregação do DAS residual e conciliação dos créditos.
+- {hybrid_control}
 
 ### Possibilidade 3 — Cenário estrutural Híbrido 2033
 
@@ -393,7 +413,7 @@ A projeção cobre janeiro a dezembro de 2027, utiliza a média dos últimos {pr
 
 ### Recomendação preliminar
 
-Priorizar o estudo do **{preferred}**. A base conciliada indica que {projection.percentual_entradas_creditaveis:.2%} das compras projetadas pode gerar crédito, e a cobertura média de entradas corresponde a {input_coverage:.2%} das vendas. A recomendação é preliminar e deve ser validada por item, fornecedor, documento fiscal e fluxo financeiro.
+Priorizar o estudo do **{preferred}**. {input_summary} A recomendação é preliminar e deve ser validada pela natureza das operações, documentação fiscal e fluxo financeiro.
 
 ### Fundamento da decisão
 

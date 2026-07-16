@@ -29,6 +29,14 @@ from analytics_engine import (
     generate_report_with_gemini,
     list_gemini_models,
 )
+from business_activity import (
+    BusinessActivityError,
+    NBS_DATA_VERSION,
+    company_summary,
+    extract_company_activities,
+    query_company_by_cnpj,
+    service_tax_candidates,
+)
 from dashboard_exports import (
     attention_points,
     build_excel_dashboard,
@@ -53,6 +61,7 @@ from simples_lc214 import (
     simulate_lc214_2027_2028,
     tax_comparison_frame,
 )
+from stakeholder_checklists import build_stakeholder_files
 from nascel_consulting import (
     NASCEL_COLORS,
     NASCEL_LOGO_URL,
@@ -644,20 +653,22 @@ def inject_styles() -> None:
         :root {--nascel-navy:#16163F; --nascel-gold:#F9AF44; --nascel-cream:#F8F3EC; --nascel-border:#E6E2DC; --nascel-muted:#626277;}
         html, body, [class*="css"] {font-family: "Montserrat", "Segoe UI", Arial, sans-serif;}
         .block-container {max-width: 1180px; padding-top: 1.5rem; padding-bottom: 3rem;}
-        [data-testid="stMetric"] {background:#FFFFFF; border:1px solid var(--nascel-border); border-top:3px solid var(--nascel-gold); padding:1rem 1.05rem; border-radius:12px; box-shadow:0 3px 12px rgba(22,22,63,.05); min-height:132px;}
-        [data-testid="stMetricLabel"] {color:var(--nascel-muted); font-weight:650; line-height:1.3; white-space:normal;}
-        [data-testid="stMetricValue"] {color:var(--nascel-navy); font-variant-numeric:tabular-nums; letter-spacing:-.025em;}
+        [data-testid="stMetric"] {background:#FFFFFF; border:1px solid var(--nascel-border); border-top:3px solid var(--nascel-gold); padding:.85rem 1rem; border-radius:12px; box-shadow:0 3px 12px rgba(22,22,63,.05); min-height:116px;}
+        [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] div, [data-testid="stMetricLabel"] p {color:var(--nascel-muted); font-size:.75rem; font-weight:650; line-height:1.35; white-space:normal; overflow:visible; text-overflow:clip;}
+        [data-testid="stMetricValue"], [data-testid="stMetricValue"] div {color:var(--nascel-navy); font-size:clamp(1.25rem, 2.1vw, 1.65rem); font-variant-numeric:tabular-nums; line-height:1.15; white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:break-word;}
+        [data-testid="stMetricDelta"] {font-size:.72rem; line-height:1.25;}
         .nascel-brand {display:flex; align-items:center; justify-content:space-between; gap:2rem; padding:1.25rem 1.5rem; background:var(--nascel-navy); border-bottom:5px solid var(--nascel-gold); border-radius:12px; margin-bottom:1.2rem;}
         .nascel-brand img {width:190px; max-width:38%; height:auto;}
         .nascel-brand-copy {color:#FFFFFF; text-align:right; font-size:.95rem; line-height:1.45;}
         .nascel-brand-copy strong {display:block; color:var(--nascel-gold); text-transform:uppercase; letter-spacing:.08em; font-size:.76rem;}
         .recommendation {padding:1.2rem 1.4rem; border-radius:12px; background:#FFF8EA; border:1px solid #F2D59F; border-left:5px solid var(--nascel-gold); color:var(--nascel-navy);}
         .subtitle {color: #5B5B6E; margin-top: -0.7rem;}
-        h1, h2, h3 {color:var(--nascel-navy); letter-spacing:-.025em;}
+        h1, h2, h3 {color:var(--nascel-navy); text-wrap:balance;}
+        p {text-wrap:pretty;}
         h2 {margin-top:2rem; padding-top:.25rem;}
         div[data-testid="stExpander"] {border-color:var(--nascel-border); border-radius:10px;}
         [data-testid="stDataFrame"] {border:1px solid var(--nascel-border); border-radius:10px; overflow:hidden;}
-        @media (max-width: 700px) {.nascel-brand {align-items:flex-start; flex-direction:column;} .nascel-brand-copy {text-align:left;} .nascel-brand img {max-width:70%;}}
+        @media (max-width: 700px) {[data-testid="stMetric"] {min-height:104px; padding:.75rem .85rem;} [data-testid="stMetricValue"], [data-testid="stMetricValue"] div {font-size:1.25rem;} .nascel-brand {align-items:flex-start; flex-direction:column;} .nascel-brand-copy {text-align:left;} .nascel-brand img {max-width:70%;}}
         </style>
         """,
         unsafe_allow_html=True,
@@ -669,6 +680,75 @@ def format_cnpj(value: str) -> str:
     if len(digits) == 14:
         return f"{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}"
     return value
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_company_lookup(cnpj: str) -> dict[str, object]:
+    return query_company_by_cnpj(cnpj)
+
+
+@st.cache_data(show_spinner=False)
+def cached_service_candidates(cnaes: tuple[str, ...]) -> pd.DataFrame:
+    return service_tax_candidates(cnaes)
+
+
+def render_activity_enrichment(cnpj: str) -> pd.DataFrame:
+    """Consulta opcional de CNPJ e candidatos de tratamento para o relatório."""
+    state_key = f"business_activity_{re.sub(r'\D', '', cnpj)}"
+    with st.expander("Enriquecimento cadastral por CNPJ, CNAE e NBS", expanded=False):
+        st.caption(
+            "Consulta opcional inspirada no AUDITORIA-NBS. O CNPJ só é enviado à BrasilAPI após sua confirmação."
+        )
+        consent = st.checkbox(
+            "Estou ciente de que o CNPJ será enviado à BrasilAPI para consulta cadastral pública.",
+            key=f"{state_key}_consent",
+        )
+        if st.button(
+            "Consultar atividades e tratamentos candidatos",
+            disabled=not consent,
+            key=f"{state_key}_button",
+            width="stretch",
+        ):
+            try:
+                with st.spinner("Consultando CNPJ e cruzando CNAE, LC 116, NBS e cClassTrib..."):
+                    company = cached_company_lookup(cnpj)
+                    activities = extract_company_activities(company)
+                    candidates = cached_service_candidates(
+                        tuple(item["CNAE"] for item in activities)
+                    )
+                st.session_state[state_key] = {
+                    "company": company,
+                    "activities": activities,
+                    "candidates": candidates,
+                }
+            except BusinessActivityError as exc:
+                st.error(str(exc))
+
+        result = st.session_state.get(state_key)
+        if not result:
+            return pd.DataFrame()
+        summary = company_summary(result["company"])
+        st.markdown(f"**{summary['Razão social']}** · {summary['Situação cadastral']} · Fonte: {summary['Fonte']}")
+        activities = pd.DataFrame(result["activities"])
+        if not activities.empty:
+            st.dataframe(activities[["Tipo", "CNAE formatado", "Atividade"]], hide_index=True, width="stretch")
+        candidates = result["candidates"]
+        if candidates.empty:
+            st.info("Nenhum candidato CNAE → NBS foi localizado nas bases auxiliares disponíveis.")
+        else:
+            reduced = candidates[
+                (candidates["Redução IBS (%)"] > 0) | (candidates["Redução CBS (%)"] > 0)
+            ]
+            metrics = st.columns(3)
+            metrics[0].metric("Candidatos NBS", candidates["NBS"].nunique())
+            metrics[1].metric("cClassTrib", candidates["cClassTrib"].nunique())
+            metrics[2].metric("Candidatos com redução", len(reduced))
+            st.dataframe(candidates, hide_index=True, width="stretch", height=360)
+            st.warning(
+                f"Classificação indicativa · base NBS {NBS_DATA_VERSION}. O CNAE não determina sozinho a NBS "
+                "nem autoriza redução: confirme a natureza real do serviço, documentos e legislação antes de aplicar."
+            )
+        return candidates
 
 
 def get_streamlit_secret(name: str, default: str = "") -> str:
@@ -697,6 +777,7 @@ def render_dominio_results(
     intelligent_report: str,
     lc214_simulation: SimplesLC214Simulation,
     lc214_comparison: pd.DataFrame,
+    activity_candidates: pd.DataFrame | None = None,
 ) -> None:
     st.success(
         f"Relatórios reconhecidos: {report.empresa} · CNPJ {format_cnpj(report.cnpj)} · "
@@ -1143,6 +1224,7 @@ def render_dominio_results(
         reports=reports,
         lc214_comparison=lc214_comparison,
         lc214_simulation=lc214_simulation,
+        activity_candidates=activity_candidates,
     )
     st.download_button(
         "Baixar dashboard executivo em Excel",
@@ -1152,6 +1234,30 @@ def render_dominio_results(
         type="primary",
         width="stretch",
     )
+
+    st.subheader("Checklists independentes para preparação de 2027")
+    st.caption(
+        "Os dois checklists externos não contêm os valores internos da simulação. "
+        "A consolidação deve permanecer com a empresa e a assessoria contábil."
+    )
+    stakeholder_files = build_stakeholder_files(report, reports, projection)
+    checklist_columns = st.columns(3)
+    labels = (
+        "Baixar checklist para clientes",
+        "Baixar checklist para fornecedores",
+        "Baixar consolidação e cálculo 2027",
+    )
+    for column, label, (file_name, content) in zip(
+        checklist_columns, labels, stakeholder_files.items()
+    ):
+        column.download_button(
+            label,
+            content,
+            file_name=file_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            width="stretch",
+            key=f"stakeholder_{file_name}",
+        )
 
 
 def render_dominio_import() -> None:
@@ -1204,6 +1310,21 @@ def render_dominio_import() -> None:
     except (DominioImportError, ValueError) as exc:
         st.error(str(exc))
         return
+
+    report_periods = {item.periodo.to_period("M") for item in reports}
+    inputs_in_report_periods = monthly.movimentos.loc[
+        monthly.movimentos["Competência"].dt.to_period("M").isin(report_periods), "Entradas"
+    ].abs().sum()
+    has_input_activity = bool(
+        any(item.base_entradas_credito > 0 for item in reports) or inputs_in_report_periods > 0
+    )
+    if not has_input_activity:
+        st.info(
+            "Empresa sem entradas identificadas: o portal considerará compras e créditos de IBS/CBS como zero. "
+            "Esse é um cenário válido para prestadores de serviços; confirme apenas se a ausência corresponde "
+            "à realidade da empresa e da competência importada."
+        )
+    activity_candidates = render_activity_enrichment(report.cnpj)
 
     compatible_pgdas = bool(pgdas_report and cnpjs_are_compatible(report.cnpj, pgdas_report))
     if compatible_pgdas and pgdas_report.anexo in {"I", "II", "III", "IV", "V"}:
@@ -1341,7 +1462,7 @@ def render_dominio_import() -> None:
         return
     render_dominio_results(
         report, monthly, pgdas_report, reports, projection, intelligent_report,
-        lc214_simulation, lc214_comparison,
+        lc214_simulation, lc214_comparison, activity_candidates,
     )
 
 

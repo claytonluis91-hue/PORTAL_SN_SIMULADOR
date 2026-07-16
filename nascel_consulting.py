@@ -203,6 +203,7 @@ def build_nascel_diagnostic(
     )
 
     period_inputs = _period_inputs(report, monthly)
+    no_input_activity = period_inputs == 0 and report.base_entradas_credito == 0
     difference = period_inputs - report.base_entradas_credito
     tolerance = abs(difference) / max(abs(period_inputs), abs(report.base_entradas_credito), 1.0)
     reconciliation_points = 20 if tolerance <= 0.01 else 10 if tolerance <= 0.05 else 0
@@ -210,8 +211,12 @@ def build_nascel_diagnostic(
         "Conciliação das entradas",
         reconciliation_points,
         20,
-        f"Diferença de R$ {difference:,.2f} ({tolerance:.2%}) entre demonstrativo e base de crédito.",
-        "Conciliar por documento e excluir aquisições sem direito a crédito."
+        "Sem entradas no demonstrativo e sem base de crédito na competência."
+        if no_input_activity
+        else f"Diferença de R$ {difference:,.2f} ({tolerance:.2%}) entre demonstrativo e base de crédito.",
+        "Confirmar que a ausência de entradas corresponde à operação normal da empresa."
+        if no_input_activity
+        else "Conciliar por documento e excluir aquisições sem direito a crédito."
         if reconciliation_points < 20 else "Conciliação dentro da tolerância gerencial de 1%.",
     )
 
@@ -225,14 +230,18 @@ def build_nascel_diagnostic(
         "Validar CNPJ/CPF, regime e participação no faturamento por cliente.",
     )
 
-    suppliers_ok = not report.fornecedores_por_regime.empty
+    suppliers_ok = not report.fornecedores_por_regime.empty or no_input_activity
     add(
         "Perfil dos fornecedores",
         10 if suppliers_ok else 0,
         10,
-        f"{len(report.fornecedores_por_regime)} classificação(ões) por regime disponíveis."
+        "Não aplicável nesta competência: empresa sem entradas informadas."
+        if no_input_activity
+        else f"{len(report.fornecedores_por_regime)} classificação(ões) por regime disponíveis."
         if suppliers_ok else "Não há classificação de fornecedores por regime.",
-        "Validar fornecedores, documentos e créditos efetivamente aproveitáveis.",
+        "Reconfirmar a ausência de compras ao atualizar a competência."
+        if no_input_activity
+        else "Validar fornecedores, documentos e créditos efetivamente aproveitáveis.",
     )
 
     monthly_periods = len(monthly.movimentos)

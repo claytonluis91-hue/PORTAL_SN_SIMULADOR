@@ -105,6 +105,7 @@ def attention_points(
     ]
     monthly_inputs = float(period_rows["Entradas"].sum()) if not period_rows.empty else 0.0
     reconciliation = monthly_inputs - report.base_entradas_credito
+    no_input_activity = monthly_inputs == 0 and report.base_entradas_credito == 0
     points: list[dict[str, str]] = []
     if pgdas is not None and not cnpjs_are_compatible(report.cnpj, pgdas):
         points.append(
@@ -128,6 +129,25 @@ def attention_points(
                 "Ação": "Identificar acumuladores excluídos e confirmar quais aquisições geram crédito.",
             }
         )
+    input_point = (
+        {
+            "Prioridade": "DECISÃO",
+            "Tema": "Empresa sem entradas na competência",
+            "O que significa": "A ausência da seção de entradas é compatível com uma prestadora sem compras no período.",
+            "Dados considerados": "Demonstrativo Mensal e base de créditos pelas entradas da Simulação da Reforma.",
+            "Constatação": "Entradas contábeis e base de crédito iguais a R$ 0,00.",
+            "Ação": "Confirmar a ausência de compras e manter os créditos de IBS/CBS zerados.",
+        }
+        if no_input_activity
+        else {
+            "Prioridade": "CRÍTICO",
+            "Tema": "Elegibilidade dos créditos",
+            "O que significa": "Nem toda entrada contábil necessariamente gera crédito aproveitável de IBS/CBS.",
+            "Dados considerados": "Base de entradas indicada pelo Domínio, antes da validação individual de documentos e operações.",
+            "Constatação": f"A simulação usa R$ {report.base_entradas_credito:,.2f} como base de entradas.",
+            "Ação": "Revisar brindes, uso/consumo, documentos inidôneos, pagamentos e operações com tratamento específico.",
+        }
+    )
     points.extend(
         [
             {
@@ -138,14 +158,7 @@ def attention_points(
                 "Constatação": f"{report.percentual_operacoes_creditaveis:.2%} das saídas não estão no acumulador 'não contribuinte'.",
                 "Ação": "Validar com relatório por CNPJ/CPF; o acumulador é apenas uma proxy de crédito comercial.",
             },
-            {
-                "Prioridade": "CRÍTICO",
-                "Tema": "Elegibilidade dos créditos",
-                "O que significa": "Nem toda entrada contábil necessariamente gera crédito aproveitável de IBS/CBS.",
-                "Dados considerados": "Base de entradas indicada pelo Domínio, antes da validação individual de documentos e operações.",
-                "Constatação": f"A simulação usa R$ {report.base_entradas_credito:,.2f} como base de entradas.",
-                "Ação": "Revisar brindes, uso/consumo, documentos inidôneos, pagamentos e operações com tratamento específico.",
-            },
+            input_point,
             {
                 "Prioridade": "ATENÇÃO",
                 "Tema": "Alíquotas futuras",
@@ -191,6 +204,7 @@ def dashboard_explanations(
     ]
     monthly_inputs = float(period_rows["Entradas"].sum()) if not period_rows.empty else 0.0
     reconciliation = monthly_inputs - report.base_entradas_credito
+    no_input_activity = monthly_inputs == 0 and report.base_entradas_credito == 0
     rows = [
         {
             "Indicador": "Saídas analisadas",
@@ -201,17 +215,22 @@ def dashboard_explanations(
         },
         {
             "Indicador": "Base de entradas para crédito",
-            "O que mostra": "Montante de aquisições considerado potencialmente creditável.",
+            "O que mostra": "Ausência de aquisições e de créditos na competência."
+            if no_input_activity else "Montante de aquisições considerado potencialmente creditável.",
             "Como foi obtido": "Base de créditos pelas entradas indicada na Simulação da Reforma.",
             "Fonte ou premissa": "Domínio; depende de documento, operação e elegibilidade fiscal.",
-            "Como interpretar": "Não deve ser tratada como crédito definitivo antes da conciliação fiscal.",
+            "Como interpretar": "Valor zero é válido para empresa sem entradas; confirme a ausência ao atualizar a competência."
+            if no_input_activity else "Não deve ser tratada como crédito definitivo antes da conciliação fiscal.",
         },
         {
             "Indicador": "Compras potencialmente creditáveis",
-            "O que mostra": "Parcela das compras atuais considerada na base de crédito de IBS/CBS.",
-            "Como foi obtido": "Base de crédito das entradas ÷ entradas contábeis da mesma competência.",
+            "O que mostra": "Não aplicável: não há compras na competência."
+            if no_input_activity else "Parcela das compras atuais considerada na base de crédito de IBS/CBS.",
+            "Como foi obtido": "Definido como zero quando entradas e base de crédito são ambas nulas."
+            if no_input_activity else "Base de crédito das entradas ÷ entradas contábeis da mesma competência.",
             "Fonte ou premissa": "Simulação da Reforma e Demonstrativo Mensal do Domínio.",
-            "Como interpretar": "Percentual alto aumenta o crédito potencial no Híbrido, mas exige validação por item e documento.",
+            "Como interpretar": "Sem compras, não há crédito de entradas para reduzir CBS/IBS no Híbrido."
+            if no_input_activity else "Percentual alto aumenta o crédito potencial no Híbrido, mas exige validação por item e documento.",
         },
         {
             "Indicador": "Atual / Por Dentro",
@@ -260,7 +279,8 @@ def dashboard_explanations(
             "O que mostra": "Diferença entre o movimento contábil de entradas e a base usada para crédito.",
             "Como foi obtido": "Entradas do Demonstrativo Mensal - base de crédito da Simulação da Reforma.",
             "Fonte ou premissa": f"Diferença da competência: R$ {reconciliation:,.2f}.",
-            "Como interpretar": "Diferença relevante deve ser explicada antes de decidir pelo regime por fora.",
+            "Como interpretar": "Conciliação válida em zero; confirme que não houve compras no período."
+            if no_input_activity else "Diferença relevante deve ser explicada antes de decidir pelo regime por fora.",
         },
     ]
     if lc214_simulation is not None:
@@ -722,6 +742,7 @@ def build_excel_dashboard(
     reports: Sequence[DominioSimulationReport] | None = None,
     lc214_comparison: pd.DataFrame | None = None,
     lc214_simulation: SimplesLC214Simulation | None = None,
+    activity_candidates: pd.DataFrame | None = None,
 ) -> bytes:
     """Cria um XLSX autocontido usando XlsxWriter, com fórmulas e gráficos."""
     import xlsxwriter
@@ -1367,6 +1388,35 @@ def build_excel_dashboard(
             else:
                 fmt = wrap
             pgdas_sheet.write(row_index, 1, row[1], fmt)
+
+    if activity_candidates is not None and not activity_candidates.empty:
+        activity_sheet = workbook.add_worksheet("Atividades_CNPJ")
+        activity_sheet.hide_gridlines(2)
+        activity_sheet.freeze_panes(5, 0)
+        activity_sheet.merge_range("A1:J2", "Candidatos de atividade e tratamento IBS/CBS", title)
+        activity_sheet.merge_range(
+            "A3:J3",
+            "Resultado indicativo: o CNAE auxilia a localizar possibilidades, mas não determina isoladamente a NBS, a cClassTrib ou a redução aplicável.",
+            note,
+        )
+        candidate_columns = list(activity_candidates.columns)
+        activity_sheet.write_row(4, 0, candidate_columns, header)
+        for row_index, values in enumerate(
+            activity_candidates.itertuples(index=False, name=None), start=5
+        ):
+            for column_index, value in enumerate(values):
+                if pd.isna(value):
+                    value = ""
+                elif hasattr(value, "item"):
+                    value = value.item()
+                activity_sheet.write(row_index, column_index, value, wrap)
+        activity_sheet.autofilter(4, 0, 4 + len(activity_candidates), len(candidate_columns) - 1)
+        activity_sheet.set_column(0, 0, 15)
+        activity_sheet.set_column(1, 1, 45)
+        activity_sheet.set_column(2, 5, 18)
+        activity_sheet.set_column(6, 6, 55)
+        activity_sheet.set_column(7, 8, 18)
+        activity_sheet.set_column(9, 9, 38)
 
     workbook.close()
     return output.getvalue()
